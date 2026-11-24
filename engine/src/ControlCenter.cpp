@@ -88,7 +88,7 @@ int g_outputMode = 0; // 0=DTS 5.1, 1=AC3 5.1, 2=PCM Stereo
 int g_dtsBitrate = 0; // 0=Full 1536k, 1=Half 768k
 int g_ac3Bitrate = 0; // 0=640k, 1=448k
 int g_latencyPreset = 2; // 0=Extreme, 1=Fast, 2=Balanced, 3=Safe, 4=Relaxed
-int g_upmixMode = 0; // 0=Dynamic Surround (Auto), 1=Always Surround, 2=Off
+int g_upmixMode = 0; // 0=Dynamic Surround, 6=Dual Stereo Copy, 7=Off
 bool g_loopback = true;
 bool g_outAutoSpdif = true;
 int  g_reloadId = 1;
@@ -426,8 +426,8 @@ void SaveConfiguration(int reloadId = 0) {
     cfg["latency"] = latencies[std::clamp(g_latencyPreset, 0, 4)];
     cfg.erase("safe"); // Use preset
 
-    const char* upmixes[] = {"dynamic", "front", "3.0", "2.1", "always", "always_front", "off"};
-    cfg["upmix"] = upmixes[std::clamp(g_upmixMode, 0, 6)];
+    const char* upmixes[] = {"dynamic", "front", "3.0", "2.1", "always", "always_front", "dual_stereo", "off"};
+    cfg["upmix"] = upmixes[std::clamp(g_upmixMode, 0, 7)];
 
     WriteKvAtomic(g_configPath, cfg);
     WriteControlFile(false, reloadId);
@@ -479,7 +479,8 @@ void LoadConfiguration() {
     else g_latencyPreset = 2; // balanced
 
     const std::string up = cfg["upmix"];
-    if (up == "off") g_upmixMode = 6;
+    if (up == "off") g_upmixMode = 7;
+    else if (up == "dual_stereo" || up == "dual-stereo" || up == "copy") g_upmixMode = 6;
     else if (up == "always_front" || up == "always_3.1") g_upmixMode = 5;
     else if (up == "always") g_upmixMode = 4;
     else if (up == "2.1" || up == "stereo_sub") g_upmixMode = 3;
@@ -1166,6 +1167,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int) {
                 "Stereo + Sub 2.1 (Front L/R + Subwoofer / LFE, Center & Rears Silent)",
                 "Always Surround 5.1 (Forced 5.1 on All Audio)",
                 "Always Front Stage 3.1 (Forced 3.1 on All Audio - Rears Silent)",
+                "Dual Stereo Copy (FL->SL / FR->SR, No Upmix, Native 5.1 Untouched)",
                 "Off (Pure Stereo 2.0: Front L/R Only, Center & Sub Silent)"
             };
             if (ImGui::Combo("Stereo Upmix", &g_upmixMode, upmixes, IM_ARRAYSIZE(upmixes))) {
