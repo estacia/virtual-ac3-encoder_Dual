@@ -157,7 +157,97 @@ std::vector<double> AntiPhaseSurroundRms(SpdifEncoder::Upmix mode)
   return rms;
 }
 
+
+std::vector<double> EncodeDualStereoRms(bool input51, bool native51)
+{
+  SpdifEncoder::Params p;
+  p.sampleRate = 48000;
+  p.inSampleFmt = AV_SAMPLE_FMT_FLT;
+  p.upmix = SpdifEncoder::Upmix::DualStereo;
+  if (input51)
+  {
+    AVChannelLayout lay51 = AV_CHANNEL_LAYOUT_5POINT1_BACK;
+    av_channel_layout_copy(&p.inLayout, &lay51);
+  }
+  else
+    av_channel_layout_default(&p.inLayout, 2);
+
+  SpdifEncoder enc;
+  bool ok = enc.Init(p);
+  av_channel_layout_uninit(&p.inLayout);
+  REQUIRE(ok);
+
+  const int fpp = enc.FramesPerPacket();
+  const int ch = input51 ? 6 : 2;
+  std::vector<float> in(static_cast<size_t>(fpp) * ch, 0.0f);
+  std::vector<uint8_t> out(SpdifEncoder::kMaxBytesPerPacket);
+  std::vector<uint8_t> stream;
+  long long t = 0;
+  for (int pk = 0; pk < 24; ++pk)
+  {
+    for (int i = 0; i < fpp; ++i)
+    {
+      const double phase = 2.0 * kPi * double(t + i) / 48000.0;
+      in[static_cast<size_t>(i) * ch + 0] = 0.25f * static_cast<float>(std::sin(440.0 * phase));
+      in[static_cast<size_t>(i) * ch + 1] = 0.22f * static_cast<float>(std::sin(554.0 * phase));
+      if (input51 && native51)
+      {
+        in[static_cast<size_t>(i) * ch + 2] = 0.20f * static_cast<float>(std::sin(660.0 * phase));
+        in[static_cast<size_t>(i) * ch + 3] = 0.12f * static_cast<float>(std::sin(100.0 * phase));
+        in[static_cast<size_t>(i) * ch + 4] = 0.18f * static_cast<float>(std::sin(330.0 * phase));
+        in[static_cast<size_t>(i) * ch + 5] = 0.17f * static_cast<float>(std::sin(392.0 * phase));
+      }
+    }
+    t += fpp;
+    const int n = enc.EncodePacket(reinterpret_cast<uint8_t*>(in.data()), out.data(),
+                                   static_cast<int>(out.size()));
+    if (n > 0) stream.insert(stream.end(), out.data(), out.data() + n);
+  }
+  REQUIRE(stream.size() > static_cast<size_t>(6144) * 4);
+  return DecodeSpdifAc3Rms(stream.data(), static_cast<int>(stream.size()));
+}
+
 } // namespace
+
+TEST_CASE("Dual Stereo Copy: 2-channel stereo is copied to matching rear channels")
+{
+  const std::vector<double> rms = EncodeDualStereoRms(false, false);
+  REQUIRE(rms.size() >= 6);
+  CHECK(rms[0] > 0.03);
+  CHECK(rms[1] > 0.03);
+  CHECK(rms[4] > 0.03);
+  CHECK(rms[5] > 0.03);
+  CHECK(rms[4] > 0.70 * rms[0]);
+  CHECK(rms[4] < 1.30 * rms[0]);
+  CHECK(rms[5] > 0.70 * rms[1]);
+  CHECK(rms[5] < 1.30 * rms[1]);
+  CHECK(rms[2] < 0.005);
+  CHECK(rms[3] < 0.005);
+}
+
+TEST_CASE("Dual Stereo Copy: stereo padded into a 5.1 endpoint is copied to rears")
+{
+  const std::vector<double> rms = EncodeDualStereoRms(true, false);
+  REQUIRE(rms.size() >= 6);
+  CHECK(rms[0] > 0.03);
+  CHECK(rms[1] > 0.03);
+  CHECK(rms[4] > 0.03);
+  CHECK(rms[5] > 0.03);
+  CHECK(rms[4] > 0.70 * rms[0]);
+  CHECK(rms[4] < 1.30 * rms[0]);
+  CHECK(rms[5] > 0.70 * rms[1]);
+  CHECK(rms[5] < 1.30 * rms[1]);
+  CHECK(rms[2] < 0.005);
+  CHECK(rms[3] < 0.005);
+}
+
+TEST_CASE("Dual Stereo Copy: native discrete 5.1 channels remain untouched")
+{
+  const std::vector<double> rms = EncodeDualStereoRms(true, true);
+  REQUIRE(rms.size() >= 6);
+  for (int c = 0; c < 6; ++c)
+    CHECK(rms[c] > 0.02);
+}
 
 TEST_CASE("upmix=surround steers anti-phase stereo into the surround channels")
 {
