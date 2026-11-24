@@ -47,6 +47,7 @@ public:
   // - StereoSub21: auto-detects non-surround sources and upmixes to 2.1 (Front L/R + Sub/LFE, Center & rears silent)
   // - Always: forces 5.1 surround upmixing unconditionally on all inputs
   // - AlwaysFront: forces 3.1 upmixing (Center + Sub/LFE) unconditionally on all inputs
+  // - DualStereo: copies FL->SL and FR->SR for stereo content; native multichannel passes through.
   enum class Upmix
   {
     Off,
@@ -56,6 +57,7 @@ public:
     StereoSub21,  // Dynamic 2.1 (FL+FR+LFE, Center & rears silent)
     Always,       // Forced 5.1 on all audio
     AlwaysFront,  // Forced 3.1 on all audio
+    DualStereo,   // Direct stereo copy: FL->SL, FR->SR; Center/LFE silent; native 5.1 untouched
   };
 
   struct Params
@@ -135,6 +137,7 @@ private:
   // Both the filter graph (stereo input) and swr (multichannel passthrough) stay live.
   bool             dynamicUpmix_ = false;
   bool             alwaysUpmix_ = false;
+  bool             dualStereo_ = false; // direct L/R copy to rear channels for stereo sources
   Upmix            upmixMode_ = Upmix::Off;
   mutable bool     effectivelyStereo_ = true;
   mutable int      multichannelHoldFrames_ = 0; // hysteresis hold for native 5.1 streams
