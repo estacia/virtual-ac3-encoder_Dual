@@ -184,7 +184,10 @@ bool SpdifEncoder::Init(const Params& p)
   // convert/downmix. When input is already multichannel but upmix is requested, use
   // "dynamic" mode: keep both paths live and detect stereo content at runtime.
   upmixMode_ = p.upmix;
-  const bool wantUpmix = (p.upmix != Upmix::Off);
+  dualStereo_ = (p.upmix == Upmix::DualStereo);
+  // Dual Stereo intentionally bypasses the FFT-based surround filter and uses only
+  // direct planar channel copies after the normal PCM -> 5.1 sample-format conversion.
+  const bool wantUpmix = (p.upmix != Upmix::Off && !dualStereo_);
   alwaysUpmix_ = (p.upmix == Upmix::Always || p.upmix == Upmix::AlwaysFront);
   useFilter_ = (wantUpmix && inLayout_.nb_channels <= 2);
   dynamicUpmix_ = (wantUpmix && inLayout_.nb_channels > 2);
@@ -272,6 +275,7 @@ void SpdifEncoder::Close()
   useDts_ = false;
   dynamicUpmix_ = false;
   alwaysUpmix_ = false;
+  dualStereo_ = false;
   upmixMode_ = Upmix::Off;
   effectivelyStereo_ = true;
   multichannelHoldFrames_ = 0;
@@ -477,6 +481,30 @@ int SpdifEncoder::EncodePacket(const uint8_t* in, uint8_t* outBuf, int outSize)
     const uint8_t* inPlanes[1] = { in };
     int got = swr_convert(swr_, frame_->data, frame_->nb_samples, inPlanes, framesPerPacket_);
     if (got < 0) { LogAv("swr_convert", got); return -1; }
+
+    // Dual Stereo Copy: for ordinary stereo input, duplicate the exact front
+    // channels to the matching rear channels. No matrix steering, FFT filter,
+    // delay line, or additional FIFO is involved. For a multichannel endpoint
+    // carrying stereo-padded audio (e.g. a 5.1-configured virtual device), use
+    // the existing discrete-channel detector; genuine 5.1 content is untouched.
+    const bool stereoSource =
+        dualStereo_ && (inLayout_.nb_channels <= 2 || IsEffectivelyStereo(in));
+    if (stereoSource && codecCtx_->ch_layout.nb_channels >= 6)
+    {
+      float* fl  = reinterpret_cast<float*>(frame_->extended_data[0]);
+      float* fr  = reinterpret_cast<float*>(frame_->extended_data[1]);
+      float* fc  = reinterpret_cast<float*>(frame_->extended_data[2]);
+      float* lfe = reinterpret_cast<float*>(frame_->extended_data[3]);
+      float* sl  = reinterpret_cast<float*>(frame_->extended_data[4]);
+      float* sr  = reinterpret_cast<float*>(frame_->extended_data[5]);
+      if (fl && fr && fc && lfe && sl && sr)
+      {
+        std::copy_n(fl, frame_->nb_samples, sl);
+        std::copy_n(fr, frame_->nb_samples, sr);
+        std::fill_n(fc, frame_->nb_samples, 0.0f);
+        std::fill_n(lfe, frame_->nb_samples, 0.0f);
+      }
+    }
   }
 
   if (usedUpmixFilter && codecCtx_->ch_layout.nb_channels >= 6)
