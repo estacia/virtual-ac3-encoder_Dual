@@ -414,7 +414,9 @@ int main(int argc, char** argv)
         pp.bitRate = c.bitRate;
         pp.dtsBitRate = c.dtsBitRate;
         pp.safeFrames = effectiveSafe;
-        if (c.upmix == "always")
+        if (c.upmix == "dual_stereo" || c.upmix == "dual-stereo" || c.upmix == "copy")
+          pp.upmix = SpdifEncoder::Upmix::DualStereo;
+        else if (c.upmix == "always")
           pp.upmix = SpdifEncoder::Upmix::Always;
         else if (c.upmix == "always_front" || c.upmix == "always_3.1")
           pp.upmix = SpdifEncoder::Upmix::AlwaysFront;
