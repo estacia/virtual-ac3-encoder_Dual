@@ -1,0 +1,130 @@
+name: One-time 0.2.6-beta2 Release
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/beta-release-beta2-once.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  build-test-and-publish:
+    runs-on: windows-2022
+    env:
+      TARGET_COMMIT: ${{ github.sha }}
+      RELEASE_VERSION: 0.2.6-beta2
+    steps:
+      - name: Checkout merged performance build
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Cache FFmpeg dev libs
+        id: ffcache
+        uses: actions/cache@v4
+        with:
+          path: third_party/ffmpeg
+          key: ffmpeg-${{ runner.os }}-${{ hashFiles('scripts/fetch-ffmpeg.ps1') }}
+
+      - name: Fetch FFmpeg
+        if: steps.ffcache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: ./scripts/fetch-ffmpeg.ps1
+
+      - name: Configure + build (Release)
+        shell: pwsh
+        run: |
+          cmake -S engine -B engine/build -G "Visual Studio 17 2022" -A x64 "-DVAC3_VERSION=$env:RELEASE_VERSION"
+          cmake --build engine/build --config Release
+
+      - name: Unit tests (ctest)
+        shell: pwsh
+        run: ctest --test-dir engine/build -C Release --output-on-failure
+
+      - name: Assemble portable package
+        shell: pwsh
+        run: |
+          $d = "dist"
+          New-Item -ItemType Directory -Force -Path "$d/scripts" | Out-Null
+          Copy-Item engine/build/Release/*.exe $d
+          Copy-Item engine/build/Release/*.dll $d
+          foreach ($x in 'VCRUNTIME140.dll','VCRUNTIME140_1.dll','MSVCP140.dll') {
+            Copy-Item "$env:WINDIR/System32/$x" $d -Force
+          }
+          Copy-Item scripts/*.ps1 "$d/scripts"
+          Copy-Item README.md,LICENSE,NOTICE.md,CLAUDE.md $d
+          Copy-Item installer/supervisor.vbs,installer/stop-engine.ps1,installer/app.ico $d
+          Copy-Item installer/quickstart.txt "$d/QUICKSTART.txt"
+          Copy-Item installer/default.conf "$d/virtual-ac3-encoder.conf"
+
+      - name: Create portable ZIP
+        shell: pwsh
+        run: Compress-Archive -Path dist/* -DestinationPath "virtual-ac3-encoder-$env:RELEASE_VERSION-win64.zip" -Force
+
+      - name: Build installer (Inno Setup)
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup -y --no-progress | Out-Null
+            $cmd = Get-Command ISCC.exe -ErrorAction SilentlyContinue
+            $iscc = if ($cmd) { $cmd.Source } else { "$env:ProgramData\chocolatey\bin\ISCC.exe" }
+          }
+          $src = (Resolve-Path dist).Path
+          & $iscc "/DAppVersion=$env:RELEASE_VERSION" "/DSourceDir=$src" installer/virtual-ac3-encoder.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed ($LASTEXITCODE)" }
+
+      - name: Publish GitHub prerelease and verify
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "v$env:RELEASE_VERSION"
+          $releaseName = $env:RELEASE_VERSION
+          $zip = "virtual-ac3-encoder-$env:RELEASE_VERSION-win64.zip"
+          $exe = "installer/Output/virtual-ac3-encoder-setup-$env:RELEASE_VERSION.exe"
+          $notesFile = "release-notes.md"
+          @'
+          **Dolby Control Center — Beta 2 low-latency release**
+
+          Built from commit ${{ github.sha }}.
+
+          - Dolby Digital (AC-3) 5.1 output is retained.
+          - AC-3 Extreme pre-roll cushion reduced to 128 samples (2.67 ms at 48 kHz), with optional custom SafeFrames.
+          - Extreme stereo upmix uses a 1024-sample FFmpeg Surround window; other presets retain 4096.
+          - S/PDIF exclusive buffer sizing uses the endpoint minimum exclusive period and preserves a complete AC-3 burst.
+          - Reused FFT input frames and raised Pro Audio render-thread MMCSS priority.
+
+          ## Downloads
+          - **virtual-ac3-encoder-setup-0.2.6-beta2.exe** — Windows installer.
+          - **virtual-ac3-encoder-0.2.6-beta2-win64.zip** — portable build.
+
+          This is a beta build. Lower SafeFrames can increase the risk of audio dropouts.
+          '@ | Set-Content -Path $notesFile -Encoding utf8
+
+          gh release create $tag --repo $env:GITHUB_REPOSITORY --target $env:TARGET_COMMIT --title $releaseName --notes-file $notesFile --prerelease $zip $exe
+          if ($LASTEXITCODE -ne 0) { throw "GitHub Release creation failed ($LASTEXITCODE)" }
+
+          $release = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$tag" | ConvertFrom-Json
+          if ($release.name -ne $releaseName -or -not $release.prerelease -or $release.draft) {
+            throw "Release metadata verification failed."
+          }
+          $assetNames = @($release.assets | ForEach-Object { $_.name })
+          if ($assetNames -notcontains "virtual-ac3-encoder-$env:RELEASE_VERSION-win64.zip" -or
+              $assetNames -notcontains "virtual-ac3-encoder-setup-$env:RELEASE_VERSION.exe") {
+            throw "The expected ZIP or installer asset is missing."
+          }
+          $tagRef = gh api "repos/$env:GITHUB_REPOSITORY/git/ref/tags/$tag" | ConvertFrom-Json
+          $tagObject = $tagRef.object
+          if ($tagObject.type -eq "tag") {
+            $annotated = gh api "repos/$env:GITHUB_REPOSITORY/git/tags/$($tagObject.sha)" | ConvertFrom-Json
+            $actualTarget = $annotated.object.sha
+          } else {
+            $actualTarget = $tagObject.sha
+          }
+          if ($actualTarget -ne $env:TARGET_COMMIT) {
+            throw "Tag target mismatch: expected $env:TARGET_COMMIT, got $actualTarget"
+          }
+          Write-Host "Verified $releaseName, both assets, and target $actualTarget"
