@@ -73,6 +73,7 @@ set_source_files_properties(src/app.rc PROPERTIES
 
 add_executable(engine
   src/main.cpp
+  src/AudioDiagnostics.h
   src/app.rc
   src/Config.h
   src/ComUtil.cpp
