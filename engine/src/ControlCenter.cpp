@@ -1149,11 +1149,11 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int) {
 
             // Latency Presets
             const char* latencies[] = {
-                "Extreme (~3 ms / 128 smp) - High-End PC Only",
-                "Fast (~7 ms / 256 smp) - Competitive Gaming",
-                "Balanced (~12 ms / 512 smp) - Recommended",
-                "Safe (~20 ms / 768 smp) - High Stability",
-                "Relaxed (~35 ms / 1536 smp) - Conservative / Laptop"
+                "Extreme (AC-3/DTS: 256/512 samples) - Lowest Cushion",
+                "Fast (384/640 samples) - Low Latency",
+                "Balanced (512/768 samples) - Recommended",
+                "Safe (768/1024 samples) - High Stability",
+                "Relaxed (1024/1536 samples) - Conservative"
             };
             if (ImGui::Combo("Latency Preset", &g_latencyPreset, latencies, IM_ARRAYSIZE(latencies))) {
                 TriggerApplySettings();
