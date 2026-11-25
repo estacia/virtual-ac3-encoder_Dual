@@ -6,7 +6,7 @@
 #include <windows.h>
 #include "AudioDiagnostics.h"
 
-constexpr const wchar_t* kMeterSharedMemName = L"Local\\VirtualAc3EncoderMeters";
+constexpr const wchar_t* kMeterSharedMemName = L"Local\\VirtualAc3EncoderMetersV2";
 constexpr uint32_t kMeterMagic = 0x56414333; // "VAC3"
 constexpr uint32_t kMeterVersion = 2;
 
