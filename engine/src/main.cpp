@@ -216,7 +216,8 @@ static bool ResolveCapture(const Config& c, ComPtr<IMMDevice>& dev, EndpointInfo
     }
     std::fprintf(stderr, "[Engine] saved input endpoint ID is unavailable; trying its friendly name.\n");
   }
-  const std::wstring inputName = c.inName.empty()
+  const std::wstring inputName = c.inName.empty() ||
+      (c.loopback && c.inName == L"CABLE Output")
       ? (c.loopback ? L"CABLE Input" : L"CABLE Output") : c.inName;
   if (DeviceEnum::FindByNameSubstring(flow, inputName, dev, info))
     return true;
