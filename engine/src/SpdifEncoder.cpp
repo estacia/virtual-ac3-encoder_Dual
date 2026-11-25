@@ -88,6 +88,37 @@ void SpdifEncoder::SetChannelGainsDb(const std::array<float, 6>& gainsDb)
   }
 }
 
+void SpdifEncoder::ApplyTimeDomainUpmix()
+{
+  if (!frame_ || !frame_->extended_data || codecCtx_->ch_layout.nb_channels < 6)
+    return;
+  float* fl  = reinterpret_cast<float*>(frame_->extended_data[0]);
+  float* fr  = reinterpret_cast<float*>(frame_->extended_data[1]);
+  float* fc  = reinterpret_cast<float*>(frame_->extended_data[2]);
+  float* lfe = reinterpret_cast<float*>(frame_->extended_data[3]);
+  float* sl  = reinterpret_cast<float*>(frame_->extended_data[4]);
+  float* sr  = reinterpret_cast<float*>(frame_->extended_data[5]);
+  if (!fl || !fr || !fc || !lfe || !sl || !sr)
+    return;
+
+  // Direct time-domain matrix; no FFT window or filter FIFO.
+  const float alpha = 1.0f - std::exp(-2.0f * 3.14159265358979323846f *
+                                      120.0f / static_cast<float>(sampleRate_));
+  constexpr float kMinus3dB = 0.70710678f;
+  for (int i = 0; i < frame_->nb_samples; ++i)
+  {
+    const float left = fl[i];
+    const float right = fr[i];
+    const float mid = 0.5f * (left + right);
+    const float side = 0.5f * (left - right);
+    fc[i] = mid * kMinus3dB;
+    sl[i] = side * kMinus3dB;
+    sr[i] = -side * kMinus3dB;
+    lfeFilterState_ += alpha * (mid - lfeFilterState_);
+    lfe[i] = lfeFilterState_;
+  }
+}
+
 void SpdifEncoder::ApplyChannelGains()
 {
   if (!frame_ || !frame_->extended_data || !codecCtx_)
@@ -223,8 +254,11 @@ bool SpdifEncoder::Init(const Params& p)
   dualStereo_ = (p.upmix == Upmix::DualStereo);
   // Dual Stereo intentionally bypasses the FFT-based surround filter and uses only
   // direct planar channel copies after the normal PCM -> 5.1 sample-format conversion.
-  const bool wantUpmix = (p.upmix != Upmix::Off && !dualStereo_);
+  const bool wantUpmix = (p.upmix != Upmix::Off && !dualStereo_ &&
+                          p.upmix != Upmix::TimeDomain);
   alwaysUpmix_ = (p.upmix == Upmix::Always || p.upmix == Upmix::AlwaysFront);
+  timeDomain_ = (p.upmix == Upmix::TimeDomain);
+  lfeFilterState_ = 0.0f;
   useFilter_ = (wantUpmix && inLayout_.nb_channels <= 2);
   dynamicUpmix_ = (wantUpmix && inLayout_.nb_channels > 2);
 
@@ -338,6 +372,8 @@ void SpdifEncoder::Close()
   if (filtFrame_) av_frame_free(&filtFrame_);
   useFilter_ = false;
   useDts_ = false;
+  timeDomain_ = false;
+  lfeFilterState_ = 0.0f;
   dynamicUpmix_ = false;
   alwaysUpmix_ = false;
   dualStereo_ = false;
@@ -599,6 +635,25 @@ int SpdifEncoder::EncodePacket(const uint8_t* in, uint8_t* outBuf, int outSize)
                                   framesPerPacket_);
       if (got < 0) { LogAv("swr_convert", got); return -1; }
     }
+  }
+  else if (timeDomain_)
+  {
+    if (av_frame_make_writable(frame_) < 0)
+      return -1;
+    const uint8_t* inPlanes[1] = { in };
+    const int got = swr_convert(swr_, frame_->data, frame_->nb_samples, inPlanes,
+                                framesPerPacket_);
+    if (got < 0) { LogAv("swr_convert(TimeDomain)", got); return -1; }
+    if (got < frame_->nb_samples)
+    {
+      const size_t tailBytes = static_cast<size_t>(frame_->nb_samples - got) * sizeof(float);
+      for (int ch = 0; ch < codecCtx_->ch_layout.nb_channels; ++ch)
+        std::memset(frame_->extended_data[ch] + static_cast<size_t>(got) * sizeof(float),
+                    0, tailBytes);
+    }
+    const bool stereoSource = (inLayout_.nb_channels <= 2) || IsEffectivelyStereo(in);
+    if (stereoSource)
+      ApplyTimeDomainUpmix();
   }
   else if (dualStereoSwr_)
   {

@@ -7,8 +7,11 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstring>
+#include <mutex>
 #include <vector>
 
 class RingBuffer
@@ -29,6 +32,22 @@ public:
 
   size_t Capacity() const { return buf_.size(); }
   size_t BytesPerFrame() const { return frameBytes_; }
+
+  // Wait for complete PCM without polling the WASAPI capture callback.
+  bool WaitForData(size_t minBytes, std::chrono::milliseconds timeout)
+  {
+    if (BytesAvailable() >= minBytes) return true;
+    std::unique_lock<std::mutex> lock(waitMutex_);
+    return dataReady_.wait_for(lock, timeout, [&] { return BytesAvailable() >= minBytes; });
+  }
+
+  void WakeWaiters()
+  {
+    {
+      std::lock_guard<std::mutex> lock(waitMutex_);
+    }
+    dataReady_.notify_all();
+  }
 
   // Consumer view: bytes ready to read (always a whole-frame multiple).
   size_t BytesAvailable() const
@@ -71,6 +90,10 @@ public:
                   totalBytes - firstBytes);
 
     head_.store(head + frames, std::memory_order_release);
+    {
+      std::lock_guard<std::mutex> lock(waitMutex_);
+    }
+    dataReady_.notify_one();
     return totalBytes;
   }
 
@@ -123,6 +146,8 @@ public:
 
 private:
   std::vector<uint8_t> buf_;
+  mutable std::mutex waitMutex_;
+  std::condition_variable dataReady_;
   size_t frameBytes_ = 1;
   size_t capacityFrames_ = 1;
   size_t maskFrames_ = 0;

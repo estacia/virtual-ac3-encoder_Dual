@@ -91,6 +91,8 @@ private:
   uint32_t cycle_ = 0;
   uint32_t minAvail_ = 0xFFFFFFFFu;
   bool     primed_ = false;
+  uint32_t burstOffsetFrames_ = 1536;
+  bool     currentBurstHasAudio_ = false;
 
   std::vector<uint8_t> staging_; // one packet of capture frames
   std::vector<uint8_t> silence_; // same, zeroed

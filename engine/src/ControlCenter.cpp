@@ -433,8 +433,8 @@ void SaveConfiguration(int reloadId = 0) {
     else
         cfg.erase("safe");
 
-    const char* upmixes[] = {"dynamic", "front", "3.0", "2.1", "always", "always_front", "dual_stereo", "off"};
-    cfg["upmix"] = upmixes[std::clamp(g_upmixMode, 0, 7)];
+    const char* upmixes[] = {"dynamic", "front", "3.0", "2.1", "always", "always_front", "dual_stereo", "off", "time_domain"};
+    cfg["upmix"] = upmixes[std::clamp(g_upmixMode, 0, 8)];
 
     WriteKvAtomic(g_configPath, cfg);
     WriteControlFile(false, reloadId);
@@ -504,7 +504,8 @@ void LoadConfiguration() {
     }
 
     const std::string up = cfg["upmix"];
-    if (up == "off") g_upmixMode = 7;
+    if (up == "time_domain" || up == "matrix" || up == "low_latency") g_upmixMode = 8;
+    else if (up == "off") g_upmixMode = 7;
     else if (up == "dual_stereo" || up == "dual-stereo" || up == "copy") g_upmixMode = 6;
     else if (up == "always_front" || up == "always_3.1") g_upmixMode = 5;
     else if (up == "always") g_upmixMode = 4;
@@ -1267,11 +1268,14 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int) {
                 "Always Surround 5.1 (Forced 5.1 on All Audio)",
                 "Always Front Stage 3.1 (Forced 3.1 on All Audio - Rears Silent)",
                 "Dual Stereo Copy (FL->SL / FR->SR, No Upmix, Native 5.1 Untouched)",
-                "Off (Pure Stereo 2.0: Front L/R Only, Center & Sub Silent)"
+                "Off (Pure Stereo 2.0: Front L/R Only, Center & Sub Silent)",
+                "Time-domain Matrix 5.1 (No FFT/FIFO; Center + Difference Rears + LFE)"
             };
             if (ImGui::Combo("Stereo Upmix", &g_upmixMode, upmixes, IM_ARRAYSIZE(upmixes))) {
                 TriggerApplySettings();
             }
+            if (g_upmixMode == 8)
+                ImGui::TextDisabled("No FFT/FIFO buffering; stereo imaging differs from Dynamic Surround.");
 
             ImGui::Spacing();
             const char* activeModeStr = (g_outputMode == 0) ? "DTS 5.1" : ((g_outputMode == 1) ? "Dolby Digital (AC3)" : "PCM Stereo");

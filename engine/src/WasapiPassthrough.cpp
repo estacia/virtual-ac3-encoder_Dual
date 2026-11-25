@@ -5,7 +5,10 @@
 #include <ks.h>
 #include <ksmedia.h>
 #include <avrt.h>
+#include <algorithm>
+#include <chrono>
 #include <cstdio>
+#include <cstring>
 
 extern "C" {
 #include <libavutil/channel_layout.h>
@@ -13,7 +16,6 @@ extern "C" {
 }
 
 namespace {
-
 AVSampleFormat MapSampleFmt(const CaptureFormat& f)
 {
   if (f.isFloat && f.bits == 32) return AV_SAMPLE_FMT_FLT;
@@ -21,21 +23,18 @@ AVSampleFormat MapSampleFmt(const CaptureFormat& f)
   if (!f.isFloat && f.bits == 32) return AV_SAMPLE_FMT_S32;
   return AV_SAMPLE_FMT_NONE;
 }
-
-// Build the AC3-over-S/PDIF format. `extended` uses the full WAVEFORMATEXTENSIBLE_IEC61937
-// (MSDN-canonical); otherwise a plain WAVEFORMATEXTENSIBLE (Kodi-style, broader compat).
 void FillAc3Format(WAVEFORMATEXTENSIBLE_IEC61937& w, int rate, bool extended)
 {
   ZeroMemory(&w, sizeof w);
   WAVEFORMATEXTENSIBLE& x = w.FormatExt;
   x.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
-  x.Format.nChannels = 2;                       // IEC 60958 carrier is 2-channel
+  x.Format.nChannels = 2;
   x.Format.nSamplesPerSec = rate;
   x.Format.wBitsPerSample = 16;
   x.Format.nBlockAlign = 4;
   x.Format.nAvgBytesPerSec = rate * 4;
   x.Samples.wValidBitsPerSample = 16;
-  x.dwChannelMask = KSAUDIO_SPEAKER_5POINT1;    // hints encoded 5.1 content
+  x.dwChannelMask = KSAUDIO_SPEAKER_5POINT1;
   x.SubFormat = KSDATAFORMAT_SUBTYPE_IEC61937_DOLBY_DIGITAL;
   if (extended)
   {
@@ -44,12 +43,8 @@ void FillAc3Format(WAVEFORMATEXTENSIBLE_IEC61937& w, int rate, bool extended)
     w.dwEncodedChannelCount = 6;
     w.dwAverageBytesPerSec = 0;
   }
-  else
-  {
-    x.Format.cbSize = sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX);
-  }
+  else x.Format.cbSize = sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX);
 }
-
 void FillDtsFormat(WAVEFORMATEXTENSIBLE_IEC61937& w, int rate, bool extended)
 {
   ZeroMemory(&w, sizeof w);
@@ -70,10 +65,7 @@ void FillDtsFormat(WAVEFORMATEXTENSIBLE_IEC61937& w, int rate, bool extended)
     w.dwEncodedChannelCount = 6;
     w.dwAverageBytesPerSec = 0;
   }
-  else
-  {
-    x.Format.cbSize = sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX);
-  }
+  else x.Format.cbSize = sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX);
 }
 } // namespace
 
@@ -87,12 +79,10 @@ WasapiPassthrough::~WasapiPassthrough()
 bool WasapiPassthrough::ProbeAc3(IMMDevice* dev, int rate)
 {
   ComPtr<IAudioClient> c;
-  if (FAILED(dev->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, &c)))
-    return false;
+  if (FAILED(dev->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, &c))) return false;
   WAVEFORMATEXTENSIBLE_IEC61937 w;
   FillAc3Format(w, rate, true);
-  if (c->IsFormatSupported(AUDCLNT_SHAREMODE_EXCLUSIVE, &w.FormatExt.Format, nullptr) == S_OK)
-    return true;
+  if (c->IsFormatSupported(AUDCLNT_SHAREMODE_EXCLUSIVE, &w.FormatExt.Format, nullptr) == S_OK) return true;
   FillAc3Format(w, rate, false);
   return c->IsFormatSupported(AUDCLNT_SHAREMODE_EXCLUSIVE, &w.FormatExt.Format, nullptr) == S_OK;
 }
@@ -100,15 +90,14 @@ bool WasapiPassthrough::ProbeAc3(IMMDevice* dev, int rate)
 bool WasapiPassthrough::ProbeDts(IMMDevice* dev, int rate)
 {
   ComPtr<IAudioClient> c;
-  if (FAILED(dev->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, &c)))
-    return false;
+  if (FAILED(dev->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, &c))) return false;
   WAVEFORMATEXTENSIBLE_IEC61937 w;
   FillDtsFormat(w, rate, true);
-  if (c->IsFormatSupported(AUDCLNT_SHAREMODE_EXCLUSIVE, &w.FormatExt.Format, nullptr) == S_OK)
-    return true;
+  if (c->IsFormatSupported(AUDCLNT_SHAREMODE_EXCLUSIVE, &w.FormatExt.Format, nullptr) == S_OK) return true;
   FillDtsFormat(w, rate, false);
   return c->IsFormatSupported(AUDCLNT_SHAREMODE_EXCLUSIVE, &w.FormatExt.Format, nullptr) == S_OK;
 }
+
 bool WasapiPassthrough::Init(IMMDevice* dev, RingBuffer* ring, const CaptureFormat& capFmt,
                              const Params& p, AudioDiagnostics* diagnostics)
 {
@@ -126,14 +115,13 @@ bool WasapiPassthrough::Init(IMMDevice* dev, RingBuffer* ring, const CaptureForm
     std::fprintf(stderr, "[WasapiPassthrough] DTS mode currently requires 48000 Hz input.\n");
     return false;
   }
-  if (params_.codec == SpdifEncoder::Codec::AC3 &&
-      rate != 48000 && rate != 44100 && rate != 32000)
+  if (params_.codec == SpdifEncoder::Codec::AC3 && rate != 48000 && rate != 44100 && rate != 32000)
   {
     std::fprintf(stderr, "[WasapiPassthrough] AC3 capture rate %d unsupported; use 48000, 44100 or 32000 Hz.\n", rate);
     return false;
   }
 
-  AVSampleFormat inFmt = MapSampleFmt(capFmt);
+  const AVSampleFormat inFmt = MapSampleFmt(capFmt);
   if (inFmt == AV_SAMPLE_FMT_NONE)
   {
     std::fprintf(stderr, "[WasapiPassthrough] unsupported capture sample format (%u-bit %s)\n",
@@ -141,7 +129,6 @@ bool WasapiPassthrough::Init(IMMDevice* dev, RingBuffer* ring, const CaptureForm
     return false;
   }
 
-  // Configure the encoder. Input = the capture layout; downmixed to 5.1 internally.
   SpdifEncoder::Params ep;
   ep.codec = params_.codec;
   ep.sampleRate = rate;
@@ -151,15 +138,13 @@ bool WasapiPassthrough::Init(IMMDevice* dev, RingBuffer* ring, const CaptureForm
   ep.surroundWindowSize = params_.surroundWindowSize;
   ep.upmix = (params_.upmix != SpdifEncoder::Upmix::Off) ? params_.upmix
            : (params_.upmixSurround ? SpdifEncoder::Upmix::Surround : SpdifEncoder::Upmix::Off);
-  if (capFmt.channelMask)
-    av_channel_layout_from_mask(&ep.inLayout, capFmt.channelMask);
-  else
-    av_channel_layout_default(&ep.inLayout, static_cast<int>(capFmt.channels));
+  if (capFmt.channelMask) av_channel_layout_from_mask(&ep.inLayout, capFmt.channelMask);
+  else av_channel_layout_default(&ep.inLayout, static_cast<int>(capFmt.channels));
 
-  bool encOk = enc_.Init(ep);
+  const bool encOk = enc_.Init(ep);
   av_channel_layout_uninit(&ep.inLayout);
-  if (!encOk)
-    return false;
+  if (!encOk) return false;
+
   framesPerPacket_ = enc_.FramesPerPacket();
   burstBytes_ = static_cast<size_t>(framesPerPacket_) * kCarrierBytesPerFrame;
   if (framesPerPacket_ <= 0 || burstBytes_ == 0 || burstBytes_ > kMaxBurstBytes)
@@ -168,14 +153,28 @@ bool WasapiPassthrough::Init(IMMDevice* dev, RingBuffer* ring, const CaptureForm
                  framesPerPacket_, burstBytes_);
     return false;
   }
+  if (!InitExclusive(rate)) return false;
 
-  if (!InitExclusive(rate))
+  const size_t packetBytes = static_cast<size_t>(framesPerPacket_) * capBytesPerFrame_;
+  staging_.resize(packetBytes);
+  silence_.assign(packetBytes, 0);
+  encoderBurst_.resize(kMaxBurstBytes);
+  queuedBursts_.resize(kEncodedQueueCapacity * kMaxBurstBytes);
+  currentBurst_.resize(kMaxBurstBytes);
+  silenceBurst_.resize(kMaxBurstBytes);
+
+  // Prepare a valid pause/silence frame. An underrun must never emit malformed
+  // all-zero carrier bytes in place of an IEC 61937 burst.
+  const int silenceBytes = enc_.EncodePacket(silence_.data(), silenceBurst_.data(),
+                                              static_cast<int>(silenceBurst_.size()));
+  if (silenceBytes != static_cast<int>(burstBytes_))
+  {
+    std::fprintf(stderr, "[WasapiPassthrough] failed to prepare valid silence burst (%d bytes).\n",
+                 silenceBytes);
     return false;
-
-  const size_t pktBytes = static_cast<size_t>(framesPerPacket_) * capBytesPerFrame_;
-  staging_.resize(pktBytes);
-  silence_.assign(pktBytes, 0);
-  burst_.resize(kMaxBurstBytes);
+  }
+  burstOffsetFrames_ = static_cast<uint32_t>(framesPerPacket_);
+  UpdateEncoderSnapshot();
   sharedMem_.OpenProducer();
   return true;
 }
@@ -187,206 +186,254 @@ bool WasapiPassthrough::InitExclusive(int rate)
 
   WAVEFORMATEXTENSIBLE_IEC61937 w;
   const bool dtsMode = params_.codec == SpdifEncoder::Codec::DTS;
-  auto fillFormat = [&](bool isExtended)
-  {
-    if (dtsMode) FillDtsFormat(w, rate, isExtended);
-    else FillAc3Format(w, rate, isExtended);
+  auto fillFormat = [&](bool extended) {
+    if (dtsMode) FillDtsFormat(w, rate, extended);
+    else FillAc3Format(w, rate, extended);
   };
+
   bool extended = true;
   fillFormat(true);
   HRESULT hr = client_->IsFormatSupported(AUDCLNT_SHAREMODE_EXCLUSIVE, &w.FormatExt.Format, nullptr);
   if (hr != S_OK)
   {
-    FillAc3Format(w, rate, false);
-    if (dtsMode) FillDtsFormat(w, rate, false);
+    fillFormat(false);
     extended = false;
     hr = client_->IsFormatSupported(AUDCLNT_SHAREMODE_EXCLUSIVE, &w.FormatExt.Format, nullptr);
   }
   if (hr != S_OK)
   {
-    std::fprintf(stderr, "[WasapiPassthrough] device does not support %s passthrough (IsFormatSupported = %s).\n",
-                 dtsMode ? "DTS" : "AC3", HrStr(hr).c_str());
+    std::fprintf(stderr, "[WasapiPassthrough] device does not support %s passthrough (%s).\n",
+                 dtsMode ? "DTS" : "AC-3", HrStr(hr).c_str());
     return false;
   }
-  std::printf("[WasapiPassthrough] %s format accepted (%s WAVEFORMATEXTENSIBLE_IEC61937)\n",
-              dtsMode ? "DTS" : "AC3", extended ? "extended" : "plain");
+  std::printf("[WasapiPassthrough] %s format accepted (%s IEC61937 format)\n",
+              dtsMode ? "DTS" : "AC-3", extended ? "extended" : "plain");
 
   REFERENCE_TIME defaultPeriod = 0;
   REFERENCE_TIME minimumExclusivePeriod = 0;
   HR_FAIL(client_->GetDevicePeriod(&defaultPeriod, &minimumExclusivePeriod), "GetDevicePeriod");
+  if (minimumExclusivePeriod <= 0) minimumExclusivePeriod = defaultPeriod;
 
-  // In exclusive mode, GetDevicePeriod's second value is the minimum endpoint
-  // scheduling period. The default period is for shared-mode engine scheduling;
-  // using it here can unnecessarily enlarge an IEC 61937 output buffer.
-  if (minimumExclusivePeriod <= 0)
-    minimumExclusivePeriod = defaultPeriod;
-
-  // AC-3 requires one complete 1536-sample burst (32 ms at 48 kHz). Request
-  // exactly one burst unless the endpoint's exclusive minimum period is larger.
   const REFERENCE_TIME burstHns =
       static_cast<REFERENCE_TIME>(10000000.0 * framesPerPacket_ / rate + 0.5);
-  REFERENCE_TIME bufferHns = std::max(burstHns, minimumExclusivePeriod);
   auto framesToHns = [rate](UINT32 frames) -> REFERENCE_TIME {
     return static_cast<REFERENCE_TIME>(10000000.0 * frames / rate + 0.5);
   };
+  const UINT32 requestedFrames = std::clamp<UINT32>(
+      params_.renderPeriodFrames, 64u, static_cast<UINT32>(std::max(64, framesPerPacket_)));
+  const REFERENCE_TIME preferredHns = std::max(minimumExclusivePeriod, framesToHns(requestedFrames));
+  const REFERENCE_TIME fullBurstHns = std::max(minimumExclusivePeriod, burstHns);
+  const REFERENCE_TIME candidates[2] = { preferredHns, fullBurstHns };
 
-  std::printf("[WasapiPassthrough] exclusive periods: shared-default=%.2f ms, "
-              "exclusive-min=%.2f ms, requested=%.2f ms\n",
+  std::printf("[WasapiPassthrough] exclusive periods: shared-default=%.2f ms, minimum=%.2f ms, "
+              "preferred=%.2f ms, full-burst=%.2f ms\n",
               defaultPeriod / 10000.0, minimumExclusivePeriod / 10000.0,
-              bufferHns / 10000.0);
+              preferredHns / 10000.0, fullBurstHns / 10000.0);
 
   bool initialized = false;
-  for (unsigned attempt = 0; attempt < 4; ++attempt)
+  bool fullBurstFallback = false;
+  REFERENCE_TIME acceptedHns = preferredHns;
+  for (int candidate = 0; candidate < 2 && !initialized; ++candidate)
   {
-    if (attempt > 0)
+    if (candidate == 1 && candidates[1] == candidates[0]) break;
+    REFERENCE_TIME bufferHns = candidates[candidate];
+    for (unsigned attempt = 0; attempt < 4; ++attempt)
     {
-      // An Initialize failure can leave the IAudioClient unusable. Always obtain a
-      // fresh client before retrying the aligned buffer size (per WASAPI guidance).
-      client_.Reset();
-      HR_FAIL(dev_->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, &client_),
-              "re-Activate IAudioClient");
+      if (candidate > 0 || attempt > 0)
+      {
+        client_.Reset();
+        HR_FAIL(dev_->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, &client_),
+                "re-Activate IAudioClient");
+      }
+      hr = client_->Initialize(AUDCLNT_SHAREMODE_EXCLUSIVE,
+                               AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_NOPERSIST,
+                               bufferHns, bufferHns, &w.FormatExt.Format, nullptr);
+      if (SUCCEEDED(hr))
+      {
+        initialized = true;
+        acceptedHns = bufferHns;
+        fullBurstFallback = candidate == 1;
+        break;
+      }
+      if (hr != AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED) break;
+
+      UINT32 alignedFrames = 0;
+      const HRESULT sizeHr = client_->GetBufferSize(&alignedFrames);
+      if (FAILED(sizeHr) || alignedFrames == 0)
+      {
+        if (FAILED(sizeHr)) hr = sizeHr;
+        break;
+      }
+      const REFERENCE_TIME nextHns = std::max(bufferHns, framesToHns(alignedFrames));
+      if (nextHns == bufferHns) break;
+      bufferHns = nextHns;
     }
-
-    hr = client_->Initialize(AUDCLNT_SHAREMODE_EXCLUSIVE,
-                             AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_NOPERSIST,
-                             bufferHns, bufferHns, &w.FormatExt.Format, nullptr);
-    if (SUCCEEDED(hr))
-    {
-      initialized = true;
-      break;
-    }
-
-    if (hr != AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED)
-      break;
-
-    UINT32 alignedFrames = 0;
-    const HRESULT sizeHr = client_->GetBufferSize(&alignedFrames);
-    if (FAILED(sizeHr) || alignedFrames == 0)
-    {
-      if (FAILED(sizeHr))
-        hr = sizeHr;
-      break;
-    }
-
-    const REFERENCE_TIME alignedHns = framesToHns(alignedFrames);
-    const REFERENCE_TIME nextBufferHns = std::max(
-        burstHns, std::max(minimumExclusivePeriod, alignedHns));
-    if (nextBufferHns == bufferHns)
-      break;
-
-    bufferHns = nextBufferHns;
   }
 
   if (!initialized)
   {
     if (hr == static_cast<HRESULT>(0x8889000A))
-    {
-      std::fprintf(stderr,
-                   "[WasapiPassthrough] exclusive Initialize failed: 0x8889000a (AUDCLNT_E_DEVICE_IN_USE).\n"
-                   "  -> Device in use by another exclusive application or duplicate engine instance.\n");
-    }
+      std::fprintf(stderr, "[WasapiPassthrough] exclusive Initialize: device in use (0x8889000a).\n");
     else
-    {
-      std::fprintf(stderr,
-                   "[WasapiPassthrough] exclusive Initialize failed: %s "
-                   "(requested %.2f ms, exclusive minimum %.2f ms)\n",
-                   HrStr(hr).c_str(), bufferHns / 10000.0,
-                   minimumExclusivePeriod / 10000.0);
-    }
+      std::fprintf(stderr, "[WasapiPassthrough] exclusive Initialize failed: %s\n", HrStr(hr).c_str());
     return false;
   }
 
   HR_FAIL(client_->GetBufferSize(&bufferFrames_), "GetBufferSize");
-  burstsPerCycle_ = static_cast<int>(bufferFrames_ / framesPerPacket_);
-  if (burstsPerCycle_ < 1)
-  {
-    std::fprintf(stderr, "[WasapiPassthrough] buffer (%u frames) smaller than one AC3 burst\n",
-                 bufferFrames_);
-    return false;
-  }
-  if (bufferFrames_ % framesPerPacket_ != 0)
-    std::fprintf(stderr, "[WasapiPassthrough] note: buffer %u not a multiple of %d; "
-                         "remainder will be zero-stuffed\n", bufferFrames_, framesPerPacket_);
-
+  if (bufferFrames_ == 0) return false;
   dataEvent_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
   stopEvent_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
   if (!dataEvent_ || !stopEvent_) return false;
   HR_FAIL(client_->SetEventHandle(dataEvent_), "SetEventHandle");
   HR_FAIL(client_->GetService(__uuidof(IAudioRenderClient), &render_), "GetService(IAudioRenderClient)");
 
-  std::printf("[WasapiPassthrough] exclusive buffer = %u frames (%d burst(s)/cycle, ~%.1f ms)\n",
-              bufferFrames_, burstsPerCycle_, 1000.0 * bufferFrames_ / rate);
+  std::printf("[WasapiPassthrough] render buffer=%u frames (~%.2f ms); %s burst=%d frames spans %.2f cycles; "
+              "accepted Initialize=%.2f ms\n",
+              bufferFrames_, 1000.0 * bufferFrames_ / rate,
+              dtsMode ? "DTS" : "AC-3", framesPerPacket_,
+              static_cast<double>(framesPerPacket_) / bufferFrames_,
+              fullBurstFallback ? " (full-burst fallback)" : "");
   return true;
 }
 
-bool WasapiPassthrough::EncodeIntoBuffer(BYTE* out)
+bool WasapiPassthrough::FillRenderBuffer(BYTE* out)
 {
-  const size_t pktBytes = staging_.size();
-  const uint32_t required = static_cast<uint32_t>(burstsPerCycle_) * framesPerPacket_;
-  const uint32_t primeTargetFrames = required + params_.safeFrames;
-  const size_t primeTargetBytes = static_cast<size_t>(primeTargetFrames) * capBytesPerFrame_;
+  if (!out || currentBurst_.size() < burstBytes_ || silenceBurst_.size() < burstBytes_)
+    return false;
 
-  // Pre-roll priming: do not begin consuming real audio until the ring buffer has
-  // accumulated safeFrames of cushion. This completely eliminates micro-starvation
-  // caused by mismatched chunk boundaries (e.g. WASAPI 480-sample loopback vs 512-sample DTS).
-  if (!primed_)
-  {
-    if (ring_->BytesAvailable() >= primeTargetBytes)
-    {
-      primed_ = true;
-    }
-  }
-
-  size_t outOff = 0;
+  UINT32 outFrames = 0;
   bool hadAudio = false;
-  for (int b = 0; b < burstsPerCycle_; ++b)
+  while (outFrames < bufferFrames_)
   {
-    const uint8_t* in;
-    if (primed_ && ring_->BytesAvailable() >= pktBytes)
+    if (burstOffsetFrames_ >= static_cast<uint32_t>(framesPerPacket_))
     {
-      ring_->Read(staging_.data(), pktBytes);
-      in = staging_.data();
-      hadAudio = true;
-    }
-    else
-    {
-      // Startup pre-roll is intentional silence. Count only starvation after the stream
-      // has primed, so diagnostics reflect actual playback underruns rather than startup.
-      if (primed_ && diagnostics_)
+      bool haveEncoded = false;
       {
-        diagnostics_->outputUnderrunFrames.fetch_add(
-            static_cast<uint64_t>(framesPerPacket_), std::memory_order_relaxed);
-        diagnostics_->outputUnderrunPackets.fetch_add(1, std::memory_order_relaxed);
+        std::lock_guard<std::mutex> lock(queueMutex_);
+        if (queueCount_ > 0)
+        {
+          const size_t offset = queueReadIndex_ * kMaxBurstBytes;
+          std::memcpy(currentBurst_.data(), queuedBursts_.data() + offset, burstBytes_);
+          queueReadIndex_ = (queueReadIndex_ + 1) % kEncodedQueueCapacity;
+          --queueCount_;
+          encoderPendingFrames_.fetch_sub(static_cast<uint32_t>(framesPerPacket_), std::memory_order_acq_rel);
+          haveEncoded = true;
+        }
       }
-      // If the buffer underruns, reset primed state only if the ring buffer is completely starved.
-      if (ring_->BytesAvailable() == 0)
-        primed_ = false;
-      in = silence_.data(); // underrun: emit AC3/DTS silence, leave the ring to refill
+      if (haveEncoded)
+      {
+        currentBurstHasAudio_ = true;
+        primed_ = true;
+        queueCv_.notify_one();
+      }
+      else
+      {
+        std::memcpy(currentBurst_.data(), silenceBurst_.data(), burstBytes_);
+        currentBurstHasAudio_ = false;
+        if (primed_ && diagnostics_)
+        {
+          diagnostics_->outputUnderrunFrames.fetch_add(
+              static_cast<uint64_t>(framesPerPacket_), std::memory_order_relaxed);
+          diagnostics_->outputUnderrunPackets.fetch_add(1, std::memory_order_relaxed);
+        }
+      }
+      burstOffsetFrames_ = 0;
     }
 
-    const size_t slotBytes = burstBytes_;
-    const int n = enc_.EncodePacket(in, burst_.data(), static_cast<int>(burst_.size()));
-    if (n <= 0 || static_cast<size_t>(n) != slotBytes)
-    {
-      static int mismatchLogs = 0;
-      if (mismatchLogs < 10)
-      {
-        std::fprintf(stderr,
-          "[WasapiPassthrough] burst size mismatch: actual=%d expected=%llu\n",
-          n, static_cast<unsigned long long>(slotBytes));
-        ++mismatchLogs;
-      }
-      // A missing or incorrectly sized burst must not corrupt the carrier alignment.
-      std::memset(burst_.data(), 0, slotBytes);
-    }
-    std::memcpy(out + outOff, burst_.data(), slotBytes);
-    outOff += slotBytes;
+    const UINT32 burstRemaining = static_cast<UINT32>(framesPerPacket_) - burstOffsetFrames_;
+    const UINT32 chunkFrames = std::min(burstRemaining, bufferFrames_ - outFrames);
+    const size_t chunkBytes = static_cast<size_t>(chunkFrames) * kCarrierBytesPerFrame;
+    std::memcpy(out + static_cast<size_t>(outFrames) * kCarrierBytesPerFrame,
+                currentBurst_.data() + static_cast<size_t>(burstOffsetFrames_) * kCarrierBytesPerFrame,
+                chunkBytes);
+    if (currentBurstHasAudio_) hadAudio = true;
+    outFrames += chunkFrames;
+    burstOffsetFrames_ += chunkFrames;
   }
-
-  const size_t totalBytes = static_cast<size_t>(bufferFrames_) * kCarrierBytesPerFrame;
-  if (outOff < totalBytes)
-    std::memset(out + outOff, 0, totalBytes - outOff); // inter-burst stuffing
   return hadAudio;
+}
+
+void WasapiPassthrough::EncoderThreadProc()
+{
+  DWORD taskIndex = 0;
+  HANDLE mmcss = AvSetMmThreadCharacteristicsW(L"Pro Audio", &taskIndex);
+  if (mmcss && !AvSetMmThreadPriority(mmcss, AVRT_PRIORITY_HIGH))
+    std::fprintf(stderr, "[WasapiPassthrough] encoder MMCSS HIGH failed: %lu\n", GetLastError());
+
+  const size_t primeBytes =
+      (static_cast<size_t>(framesPerPacket_) + params_.safeFrames) * capBytesPerFrame_;
+  const size_t packetBytes = staging_.size();
+  const std::chrono::milliseconds waitSlice(20);
+  bool encoderPrimed = false;
+
+  while (running_.load(std::memory_order_relaxed))
+  {
+    {
+      std::unique_lock<std::mutex> lock(queueMutex_);
+      queueCv_.wait(lock, [&] {
+        return queueCount_ < kEncodedQueueCapacity || !running_.load(std::memory_order_relaxed);
+      });
+    }
+    if (!running_.load(std::memory_order_relaxed)) break;
+
+    size_t available = ring_->BytesAvailable();
+    if (!encoderPrimed)
+    {
+      if (available < primeBytes)
+      {
+        ring_->WaitForData(primeBytes, waitSlice);
+        continue;
+      }
+      encoderPrimed = true;
+    }
+    available = ring_->BytesAvailable();
+    if (available < packetBytes)
+    {
+      if (available == 0) encoderPrimed = false;
+      ring_->WaitForData(encoderPrimed ? packetBytes : primeBytes, waitSlice);
+      continue;
+    }
+    if (ring_->Read(staging_.data(), packetBytes) != packetBytes) continue;
+
+    encoderPendingFrames_.fetch_add(static_cast<uint32_t>(framesPerPacket_), std::memory_order_acq_rel);
+    const int encodedBytes = enc_.EncodePacket(staging_.data(), encoderBurst_.data(),
+                                               static_cast<int>(encoderBurst_.size()));
+    UpdateEncoderSnapshot();
+
+    if (encodedBytes < 0)
+    {
+      encoderPendingFrames_.fetch_sub(static_cast<uint32_t>(framesPerPacket_), std::memory_order_acq_rel);
+      failed_.store(true, std::memory_order_release);
+      running_.store(false, std::memory_order_release);
+      if (diagnostics_) diagnostics_->outputWasapiErrors.fetch_add(1, std::memory_order_relaxed);
+      std::fprintf(stderr, "[WasapiPassthrough] AC-3/DTS encoder worker failed.\n");
+      queueCv_.notify_all();
+      ring_->WakeWaiters();
+      if (stopEvent_) SetEvent(stopEvent_);
+      break;
+    }
+    if (encodedBytes != static_cast<int>(burstBytes_))
+    {
+      std::fprintf(stderr, "[WasapiPassthrough] encoded burst mismatch (%d != %zu); using silence.\n",
+                   encodedBytes, burstBytes_);
+      std::memcpy(encoderBurst_.data(), silenceBurst_.data(), burstBytes_);
+    }
+
+    {
+      std::lock_guard<std::mutex> lock(queueMutex_);
+      if (!running_.load(std::memory_order_relaxed))
+      {
+        encoderPendingFrames_.fetch_sub(static_cast<uint32_t>(framesPerPacket_), std::memory_order_acq_rel);
+        break;
+      }
+      const size_t offset = queueWriteIndex_ * kMaxBurstBytes;
+      std::memcpy(queuedBursts_.data() + offset, encoderBurst_.data(), burstBytes_);
+      queueWriteIndex_ = (queueWriteIndex_ + 1) % kEncodedQueueCapacity;
+      ++queueCount_;
+    }
+    queueCv_.notify_all();
+  }
+  if (mmcss) AvRevertMmThreadCharacteristics(mmcss);
 }
 
 bool WasapiPassthrough::Start()
@@ -396,13 +443,35 @@ bool WasapiPassthrough::Start()
     std::fprintf(stderr, "[WasapiPassthrough] Start requested before successful Init\n");
     return false;
   }
-  if (running_.exchange(true, std::memory_order_relaxed))
-    return true;
+  if (running_.exchange(true, std::memory_order_relaxed)) return true;
+
   failed_.store(false, std::memory_order_relaxed);
   ResetEvent(stopEvent_);
-  cycle_ = 0;
   minAvail_ = 0xFFFFFFFFu;
+  driftFrameAccumulator_ = 0;
   primed_ = false;
+  burstOffsetFrames_ = static_cast<uint32_t>(framesPerPacket_);
+  currentBurstHasAudio_ = false;
+  encoderPendingFrames_.store(0, std::memory_order_relaxed);
+  {
+    std::lock_guard<std::mutex> lock(queueMutex_);
+    queueReadIndex_ = queueWriteIndex_ = queueCount_ = 0;
+  }
+
+  encoderThread_ = std::thread(&WasapiPassthrough::EncoderThreadProc, this);
+  const size_t requiredBursts =
+      std::max<size_t>(1, (bufferFrames_ + framesPerPacket_ - 1) / framesPerPacket_);
+  {
+    std::unique_lock<std::mutex> lock(queueMutex_);
+    queueCv_.wait_for(lock, std::chrono::milliseconds(120), [&] {
+      return queueCount_ >= requiredBursts || !running_.load(std::memory_order_relaxed);
+    });
+  }
+  if (!running_.load(std::memory_order_relaxed))
+  {
+    if (encoderThread_.joinable()) encoderThread_.join();
+    return false;
+  }
 
   BYTE* out = nullptr;
   HRESULT hr = render_->GetBuffer(bufferFrames_, &out);
@@ -412,10 +481,13 @@ bool WasapiPassthrough::Start()
     running_.store(false, std::memory_order_relaxed);
     if (diagnostics_) diagnostics_->outputWasapiErrors.fetch_add(1, std::memory_order_relaxed);
     std::fprintf(stderr, "[WasapiPassthrough] initial GetBuffer failed: %s\n", HrStr(hr).c_str());
+    queueCv_.notify_all();
+    ring_->WakeWaiters();
+    if (encoderThread_.joinable()) encoderThread_.join();
     return false;
   }
 
-  const bool hadAudio = EncodeIntoBuffer(out);
+  const bool hadAudio = FillRenderBuffer(out);
   hr = render_->ReleaseBuffer(bufferFrames_, 0);
   if (FAILED(hr))
   {
@@ -423,6 +495,9 @@ bool WasapiPassthrough::Start()
     running_.store(false, std::memory_order_relaxed);
     if (diagnostics_) diagnostics_->outputWasapiErrors.fetch_add(1, std::memory_order_relaxed);
     std::fprintf(stderr, "[WasapiPassthrough] initial ReleaseBuffer failed: %s\n", HrStr(hr).c_str());
+    queueCv_.notify_all();
+    ring_->WakeWaiters();
+    if (encoderThread_.joinable()) encoderThread_.join();
     return false;
   }
 
@@ -444,6 +519,9 @@ bool WasapiPassthrough::Start()
     running_.store(false, std::memory_order_relaxed);
     if (diagnostics_) diagnostics_->outputWasapiErrors.fetch_add(1, std::memory_order_relaxed);
     std::fprintf(stderr, "[WasapiPassthrough] client Start failed: %s\n", HrStr(hr).c_str());
+    queueCv_.notify_all();
+    ring_->WakeWaiters();
+    if (encoderThread_.joinable()) encoderThread_.join();
     return false;
   }
 
@@ -466,7 +544,7 @@ bool WasapiPassthrough::Start()
 
 void WasapiPassthrough::Stop()
 {
-  const bool wasRunning = running_.exchange(false, std::memory_order_relaxed);
+  running_.store(false, std::memory_order_relaxed);
   primed_ = false;
   if (sharedMem_.IsOpen())
   {
@@ -481,16 +559,25 @@ void WasapiPassthrough::Stop()
       for (int i = 0; i < 6; ++i) { ms->peakLevels[i] = 0.0f; ms->rmsLevels[i] = 0.0f; }
     }
   }
-  if (wasRunning && stopEvent_) SetEvent(stopEvent_);
+  if (stopEvent_) SetEvent(stopEvent_);
+  queueCv_.notify_all();
+  if (ring_) ring_->WakeWaiters();
   if (thread_.joinable()) thread_.join();
-  if (client_) {
-    if (wasRunning) client_->Stop();
-    client_.Reset();
-  }
+  if (encoderThread_.joinable()) encoderThread_.join();
+  if (client_) client_->Stop();
+  client_.Reset();
   render_.Reset();
   dev_.Reset();
   if (dataEvent_) { CloseHandle(dataEvent_); dataEvent_ = nullptr; }
   if (stopEvent_) { CloseHandle(stopEvent_); stopEvent_ = nullptr; }
+}
+
+void WasapiPassthrough::UpdateEncoderSnapshot()
+{
+  filterStateSnapshot_.store(static_cast<uint32_t>(enc_.GetFilterStatus()), std::memory_order_relaxed);
+  filterHopSnapshot_.store(enc_.FilterHopFrames(), std::memory_order_relaxed);
+  filterFifoSnapshot_.store(enc_.FilterFifoFrames(), std::memory_order_relaxed);
+  filterTargetSnapshot_.store(enc_.FilterFifoTargetFrames(), std::memory_order_relaxed);
 }
 
 void WasapiPassthrough::PublishDiagnostics()
@@ -501,13 +588,13 @@ void WasapiPassthrough::PublishDiagnostics()
                           ring_ ? ring_->Capacity() : 0, capBytesPerFrame_);
   if (!state) return;
   InterlockedExchange(&state->surroundFilterState,
-      static_cast<LONG>(enc_.GetFilterStatus()));
+      static_cast<LONG>(filterStateSnapshot_.load(std::memory_order_relaxed)));
   InterlockedExchange(&state->surroundFilterHopFrames,
-      static_cast<LONG>(enc_.FilterHopFrames()));
+      static_cast<LONG>(filterHopSnapshot_.load(std::memory_order_relaxed)));
   InterlockedExchange64(&state->surroundFilterFifoFrames,
-      static_cast<LONG64>(enc_.FilterFifoFrames()));
+      static_cast<LONG64>(filterFifoSnapshot_.load(std::memory_order_relaxed)));
   InterlockedExchange(&state->surroundFilterTargetFrames,
-      static_cast<LONG>(enc_.FilterFifoTargetFrames()));
+      static_cast<LONG>(filterTargetSnapshot_.load(std::memory_order_relaxed)));
 }
 
 void WasapiPassthrough::ThreadProc()
@@ -518,16 +605,14 @@ void WasapiPassthrough::ThreadProc()
     std::fprintf(stderr, "[WasapiPassthrough] AvSetMmThreadPriority(HIGH) failed: %lu\n",
                  GetLastError());
 
-  const uint32_t required = static_cast<uint32_t>(burstsPerCycle_) * framesPerPacket_;
-  const uint32_t desired = required + params_.safeFrames;
+  const uint32_t desired = static_cast<uint32_t>(framesPerPacket_) + params_.safeFrames;
   HANDLE waits[2] = { dataEvent_, stopEvent_ };
   unsigned consecutiveTimeouts = 0;
 
   while (running_.load(std::memory_order_relaxed))
   {
     const DWORD wr = WaitForMultipleObjects(2, waits, FALSE, 2000);
-    if (wr == WAIT_OBJECT_0 + 1)
-      break;
+    if (wr == WAIT_OBJECT_0 + 1) break;
     if (wr == WAIT_TIMEOUT)
     {
       if (diagnostics_) diagnostics_->eventTimeouts.fetch_add(1, std::memory_order_relaxed);
@@ -555,19 +640,18 @@ void WasapiPassthrough::ThreadProc()
     }
     consecutiveTimeouts = 0;
 
-    // --- drift control (SoundPusher style with hysteresis & gentle step-trimming) ---
     if (primed_)
     {
       const uint32_t avail =
-          static_cast<uint32_t>(ring_->BytesAvailable() / capBytesPerFrame_);
-      if (avail < minAvail_)
-        minAvail_ = avail;
+          static_cast<uint32_t>(ring_->BytesAvailable() / capBytesPerFrame_) +
+          encoderPendingFrames_.load(std::memory_order_acquire);
+      if (avail < minAvail_) minAvail_ = avail;
 
-      const uint32_t driftCycles = (framesPerPacket_ <= 512) ? 96 : 32;
-      if (cycle_++ % driftCycles == 0)
+      driftFrameAccumulator_ += bufferFrames_;
+      if (driftFrameAccumulator_ >= capFmt_.sampleRate)
       {
-        const uint32_t hysteresis =
-            std::max<uint32_t>(static_cast<uint32_t>(framesPerPacket_), params_.safeFrames);
+        const uint32_t hysteresis = std::max<uint32_t>(
+            static_cast<uint32_t>(framesPerPacket_), params_.safeFrames);
         if (minAvail_ != 0xFFFFFFFFu && minAvail_ > desired + hysteresis)
         {
           const uint32_t excess = minAvail_ - (desired + hysteresis / 2);
@@ -578,12 +662,13 @@ void WasapiPassthrough::ThreadProc()
             diagnostics_->driftTrimFrames.fetch_add(trim, std::memory_order_relaxed);
         }
         minAvail_ = 0xFFFFFFFFu;
+        driftFrameAccumulator_ %= capFmt_.sampleRate;
       }
     }
     else
     {
       minAvail_ = 0xFFFFFFFFu;
-      cycle_ = 0;
+      driftFrameAccumulator_ = 0;
     }
 
     BYTE* out = nullptr;
@@ -595,7 +680,7 @@ void WasapiPassthrough::ThreadProc()
       std::fprintf(stderr, "[WasapiPassthrough] GetBuffer failed: %s\n", HrStr(hr).c_str());
       break;
     }
-    const bool hadAudio = EncodeIntoBuffer(out);
+    const bool hadAudio = FillRenderBuffer(out);
     hr = render_->ReleaseBuffer(bufferFrames_, 0);
     if (FAILED(hr))
     {
@@ -617,6 +702,6 @@ void WasapiPassthrough::ThreadProc()
     }
     PublishDiagnostics();
   }
-
   if (mmcss) AvRevertMmThreadCharacteristics(mmcss);
 }
+} // namespace
