@@ -1,0 +1,1 @@
+Temporary WDK CI probe after installing the Windows SDK and WDK command-line tools. Do not merge.
