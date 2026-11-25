@@ -1103,14 +1103,15 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int) {
         // --- 3. Audio Routing & Hardware Configuration ---
         if (ImGui::CollapsingHeader("AUDIO ROUTING & FORMAT", ImGuiTreeNodeFlags_DefaultOpen)) {
             // Loopback Capture Toggle
-            if (ImGui::Checkbox("WASAPI Loopback Capture (Play to CABLE Input, capture directly)", &g_loopback)) {
+            if (ImGui::Checkbox("WASAPI Loopback Capture (required for render-only virtual 5.1)", &g_loopback)) {
                 const auto& newDevs = g_loopback ? g_renderDevices : g_captureDevices;
                 g_selectedInDevice = FindDeviceBySubstring(newDevs, g_loopback ? "CABLE Input" : "CABLE Output");
                 if (g_selectedInDevice < 0 && !newDevs.empty()) g_selectedInDevice = 0;
                 TriggerApplySettings();
             }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Keep enabled when using the render-only Virtual AC3 Encoder 5.1 WaveRT device. Disable only when selecting a real recording endpoint such as VB-CABLE CABLE Output; that path can request a low-latency IAudioClient3 shared-mode period.");
             ImGui::SameLine();
-            ImGui::TextDisabled(g_loopback ? "(Loopback path; compare with direct capture for latency)" : "(Direct capture; requests 5 ms IAudioClient3 when supported)");
+            ImGui::TextDisabled(g_loopback ? "(Render endpoint: Windows engine default period)" : "(Recording endpoint: IAudioClient3 5 ms request when supported; 10 ms in Safe/Relaxed)");
 
             const auto& inDevs = g_loopback ? g_renderDevices : g_captureDevices;
 
