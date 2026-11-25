@@ -33,6 +33,7 @@ public:
     int64_t  dtsBitRate = 1536000;
     uint32_t safeFrames = 1536;    // target excess frames kept buffered (latency vs. safety)
     SpdifEncoder::Upmix upmix = SpdifEncoder::Upmix::Off;
+    int      surroundWindowSize = 4096; // 1024 (512-sample hop) for low-latency Extreme mode
     bool     upmixSurround = false; // legacy compatibility flag (mapped to upmix if true)
   };
 

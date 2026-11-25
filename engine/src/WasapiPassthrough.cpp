@@ -148,6 +148,7 @@ bool WasapiPassthrough::Init(IMMDevice* dev, RingBuffer* ring, const CaptureForm
   ep.bitRate = params_.bitRate;
   ep.dtsBitRate = params_.dtsBitRate;
   ep.inSampleFmt = inFmt;
+  ep.surroundWindowSize = params_.surroundWindowSize;
   ep.upmix = (params_.upmix != SpdifEncoder::Upmix::Off) ? params_.upmix
            : (params_.upmixSurround ? SpdifEncoder::Upmix::Surround : SpdifEncoder::Upmix::Off);
   if (capFmt.channelMask)
