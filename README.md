@@ -103,7 +103,8 @@ flowchart TD
 2. Open **Windows Sound Settings (`mmsys.cpl`)**:
    - Set **CABLE Input (VB-Audio Virtual Cable)** as your **Default Playback Device**.
    - *(Optional)* Select **CABLE Input** -> **Configure** -> **5.1 Surround** (or leave as Stereo and let **Dynamic Surround 5.1** / **Front Stage 3.1** upmix automatically).
-3. Connect your PC's **Optical (S/PDIF / Toslink)** port to your AV receiver or soundbar.
+3. Dolby Control Center uses the paired **CABLE Output** recording endpoint for direct capture by default. When supported, it requests a **5 ms IAudioClient3 shared-mode period** (10 ms in Safe/Relaxed presets). This is the recommended low-latency path; WASAPI Loopback remains available in the GUI for render-endpoint capture, but Windows does not allow IAudioClient3 custom-period initialization with the LOOPBACK flag.
+4. Connect your PC's **Optical (S/PDIF / Toslink)** port to your AV receiver or soundbar.
 
 ### 2. Install Dolby Control Center
 Download the latest release from **[Releases](https://github.com/PatalJunior/virtual-ac3-encoder/releases/latest)**:
@@ -157,8 +158,8 @@ engine.exe --in "CABLE Output" --out-spdif --bitrate 640000 --upmix surround
 | `--list` | List all active Windows render and capture endpoints. |
 | `--probe` | Query `IAudioClient::IsFormatSupported` for IEC 61937 AC-3 support on all render endpoints. |
 | `--mon` | Run a 5-second capture-only throughput diagnostic. |
-| `--loopback` | Capture `--in` as a *render* endpoint via WASAPI loopback (default for `CABLE Input` / virtual driver). |
-| `--direct-capture` | Capture `--in` from a *recording* endpoint (e.g. `CABLE Output`); requests IAudioClient3 when supported. Use this to compare latency with loopback. |
+| `--loopback` | Capture `--in` as a *render* endpoint via WASAPI loopback; uses the Windows audio-engine period. |
+| `--direct-capture` | Capture `--in` from a *recording* endpoint (e.g. `CABLE Output`); requests a 5 ms IAudioClient3 period when supported (10 ms in Safe/Relaxed). Recommended for lowest capture latency. |
 | `--in <name>` / `--in-id <id>` | Capture device friendly-name substring or exact endpoint ID. |
 | `--out <name>` / `--out-id <id>` | Optical output device friendly-name substring or exact endpoint ID. |
 | `--out-spdif` | Automatically pick the first render endpoint with an `SPDIF` form factor. |

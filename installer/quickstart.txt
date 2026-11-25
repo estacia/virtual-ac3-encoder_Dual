@@ -12,8 +12,14 @@ Requirements
        https://vb-audio.com/Cable/
    After installing, open Windows Sound settings:
      - Set "CABLE Input (VB-Audio Virtual Cable)" as your DEFAULT playback device.
+     - Dolby Control Center captures the paired "CABLE Output" recording endpoint by default.
+       This direct-capture path requests a 5 ms IAudioClient3 shared-mode period when supported
+       (10 ms in Safe/Relaxed presets), reducing capture-side buffering.
      - (Optional) Configure Speakers > 5.1 Surround, or leave as Stereo and use Dynamic
        Surround 5.1 / Front Stage 3.1 upmixing in the Control Center.
+     - Enable "WASAPI Loopback Capture" only when you specifically need to capture a render
+       endpoint directly; loopback uses the Windows audio-engine period rather than a custom
+       IAudioClient3 period.
 
 2. An optical (S-PDIF / Toslink) output connected to your receiver's optical input.
 

@@ -62,10 +62,11 @@ bool WasapiCapture::Init(IMMDevice* dev, bool loopback, REFERENCE_TIME preferred
   bool usedAudioClient3 = false;
   UINT32 selectedPeriodFrames = 0;
 
-  // IAudioClient3 is used for real capture endpoints. Request a moderate 5 ms
-  // period (10 ms in Safe/Relaxed modes) rather than blindly selecting the
-  // smallest driver-supported period. Loopback uses the classic event-driven
-  // IAudioClient path for broad endpoint compatibility.
+  // IAudioClient3::InitializeSharedAudioStream does not support the LOOPBACK
+  // stream flag. Use it for direct recording-endpoint capture only; loopback must
+  // use IAudioClient::Initialize and the Windows audio-engine period. For direct
+  // capture, request 5 ms (10 ms in Safe/Relaxed modes), aligned to the endpoint's
+  // supported fundamental period rather than blindly selecting its minimum.
   if (!loopback_)
   {
     ComPtr<IAudioClient3> client3;
@@ -174,7 +175,8 @@ bool WasapiCapture::Init(IMMDevice* dev, bool loopback, REFERENCE_TIME preferred
       : (usedAudioClient3 ? "IAudioClient3 event-driven" : "shared event-driven fallback");
   char periodLabel[64] = "audio-engine default";
   if (usedAudioClient3)
-    std::snprintf(periodLabel, sizeof(periodLabel), "%u frames", selectedPeriodFrames);
+    std::snprintf(periodLabel, sizeof(periodLabel), "%u frames (~%.2f ms)",
+                  selectedPeriodFrames, 1000.0 * selectedPeriodFrames / fmt_.sampleRate);
 
   std::printf("[WasapiCapture] %s: %u ch, %u Hz, %u-bit %s, mask=0x%X; "
               "buffer=%u frames (~%.2f ms), period=%s\n",

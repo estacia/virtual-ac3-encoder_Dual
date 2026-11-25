@@ -35,9 +35,10 @@ public:
   // Opens `dev` for shared event-driven capture and learns its mix format.
   //   loopback == false: a real capture endpoint; uses IAudioClient3 when available.
   //   loopback == true : a RENDER endpoint captured via event-driven LOOPBACK.
-  //                      A short polling fallback supports older loopback implementations.
-  //   preferredPeriodHns: requested IAudioClient3 period in 100ns units (default 50000 = 5ms).
-  //                       Loopback and fallback paths use the Windows audio-engine period.
+  //                      Uses the Windows audio-engine period; IAudioClient3 custom
+  //                      periods are not supported with AUDCLNT_STREAMFLAGS_LOOPBACK.
+  //   loopback == false: requests preferredPeriodHns through IAudioClient3 when available.
+  //   preferredPeriodHns: requested period in 100ns units (default 50000 = 5ms).
   bool Init(IMMDevice* dev, bool loopback = false, REFERENCE_TIME preferredPeriodHns = 50000,
             AudioDiagnostics* diagnostics = nullptr);
   // Destination ring for captured samples (set before Start, once it can be sized).
