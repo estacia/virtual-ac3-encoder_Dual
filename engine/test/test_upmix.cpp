@@ -249,6 +249,16 @@ TEST_CASE("Dual Stereo Copy: native discrete 5.1 channels remain untouched")
     CHECK(rms[c] > 0.02);
 }
 
+TEST_CASE("time-domain upmix steers anti-phase stereo without FFT buffering")
+{
+  const std::vector<double> rms = AntiPhaseSurroundRms(SpdifEncoder::Upmix::TimeDomain);
+  REQUIRE(rms.size() >= 6);
+  CHECK(rms[4] > 0.05);
+  CHECK(rms[5] > 0.05);
+  CHECK(rms[2] < 0.02);
+  CHECK(rms[3] < 0.02);
+}
+
 TEST_CASE("upmix=surround steers anti-phase stereo into the surround channels")
 {
   std::vector<double> on = AntiPhaseSurroundRms(SpdifEncoder::Upmix::Surround);

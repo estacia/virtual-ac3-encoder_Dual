@@ -96,6 +96,21 @@ TEST_CASE("clear empties the buffer")
   CHECK(rb.SpaceAvailable() == rb.Capacity());
 }
 
+TEST_CASE("WaitForData wakes after producer publishes a complete frame")
+{
+  RingBuffer rb(64, 4);
+  uint32_t value = 0x12345678;
+  std::thread producer([&] {
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    rb.Write(&value, sizeof(value));
+  });
+  CHECK(rb.WaitForData(sizeof(value), std::chrono::milliseconds(200)));
+  uint32_t output = 0;
+  CHECK(rb.Read(&output, sizeof(output)) == sizeof(output));
+  CHECK(output == value);
+  producer.join();
+}
+
 TEST_CASE("SPSC concurrent transfer preserves every byte in order")
 {
   // Producer sends a known sequence (wrapping mod 256); consumer reads it back.

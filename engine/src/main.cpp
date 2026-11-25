@@ -429,6 +429,8 @@ int main(int argc, char** argv)
             (c.latencyMode == "extreme" || c.latencyMode == "ultra") ? 1024 : 4096;
         if (c.upmix == "dual_stereo" || c.upmix == "dual-stereo" || c.upmix == "copy")
           pp.upmix = SpdifEncoder::Upmix::DualStereo;
+        else if (c.upmix == "time_domain" || c.upmix == "matrix" || c.upmix == "low_latency")
+          pp.upmix = SpdifEncoder::Upmix::TimeDomain;
         else if (c.upmix == "always")
           pp.upmix = SpdifEncoder::Upmix::Always;
         else if (c.upmix == "always_front" || c.upmix == "always_3.1")

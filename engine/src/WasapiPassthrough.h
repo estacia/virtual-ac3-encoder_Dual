@@ -20,6 +20,8 @@
 #include <mmdeviceapi.h>
 
 #include <atomic>
+#include <condition_variable>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -31,7 +33,8 @@ public:
     SpdifEncoder::Codec codec = SpdifEncoder::Codec::AC3;
     int64_t  bitRate = 640000;
     int64_t  dtsBitRate = 1536000;
-    uint32_t safeFrames = 1536;    // target excess frames kept buffered (latency vs. safety)
+    uint32_t safeFrames = 1536;    // target PCM cushion after the initial AC-3 frame
+    uint32_t renderPeriodFrames = 256; // ~5.33 ms at 48 kHz; endpoint may force fallback
     SpdifEncoder::Upmix upmix = SpdifEncoder::Upmix::Off;
     int      surroundWindowSize = 4096; // 1024 (512-sample hop) for low-latency Extreme mode
     bool     upmixSurround = false; // legacy compatibility flag (mapped to upmix if true)
@@ -58,7 +61,9 @@ public:
 
 private:
   bool InitExclusive(int rate);
-  bool EncodeIntoBuffer(BYTE* out); // fills one full WASAPI buffer with bursts (+ stuffing); returns true if non-underrun
+  bool FillRenderBuffer(BYTE* out);
+  void EncoderThreadProc();
+  void UpdateEncoderSnapshot();
   void PublishDiagnostics();
   void ThreadProc();
 
@@ -83,17 +88,37 @@ private:
 
   HANDLE dataEvent_ = nullptr;
   HANDLE stopEvent_ = nullptr;
-  std::thread thread_;
+  std::thread thread_;        // short-period WASAPI render thread
+  std::thread encoderThread_; // PCM -> AC-3/DTS -> IEC 61937 worker
   std::atomic_bool running_{false};
   std::atomic_bool failed_{false};
 
-  // drift tracking (consumer thread only)
-  uint32_t cycle_ = 0;
+  static constexpr size_t kEncodedQueueCapacity = 12;
+  mutable std::mutex queueMutex_;
+  std::condition_variable queueCv_;
+  size_t queueReadIndex_ = 0;
+  size_t queueWriteIndex_ = 0;
+  size_t queueCount_ = 0;
+  std::atomic<uint32_t> encoderPendingFrames_{0};
+
+  std::atomic<uint32_t> filterStateSnapshot_{0};
+  std::atomic<uint32_t> filterHopSnapshot_{0};
+  std::atomic<uint32_t> filterFifoSnapshot_{0};
+  std::atomic<uint32_t> filterTargetSnapshot_{0};
+
+  // Drift tracking (render thread only).
+  uint32_t driftFrameAccumulator_ = 0;
   uint32_t minAvail_ = 0xFFFFFFFFu;
   bool     primed_ = false;
+  uint32_t burstOffsetFrames_ = 1536;
+  bool     currentBurstHasAudio_ = false;
 
-  std::vector<uint8_t> staging_; // one packet of capture frames
-  std::vector<uint8_t> silence_; // same, zeroed
-  std::vector<uint8_t> burst_;   // one IEC 61937 burst
+  // Encoder worker and render thread buffers.
+  std::vector<uint8_t> staging_;
+  std::vector<uint8_t> silence_;
+  std::vector<uint8_t> encoderBurst_;
+  std::vector<uint8_t> queuedBursts_;
+  std::vector<uint8_t> currentBurst_;
+  std::vector<uint8_t> silenceBurst_;
   MeterSharedMemory    sharedMem_;
 };

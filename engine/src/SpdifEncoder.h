@@ -71,6 +71,7 @@ public:
     Always,       // Forced 5.1 on all audio
     AlwaysFront,  // Forced 3.1 on all audio
     DualStereo,   // Direct stereo copy: FL->SL, FR->SR; Center/LFE silent; native 5.1 untouched
+    TimeDomain,   // Center/difference-rear + one-pole LFE; no FFT/FIFO latency
   };
 
   struct Params
@@ -126,6 +127,7 @@ private:
   bool FeedFilter(const uint8_t* in);  // push one input packet, drain output into fifo_
   int  EncodeFrameToBurst(uint8_t* outBuf, int outSize);
   void ApplyChannelGains();
+  void ApplyTimeDomainUpmix();
   void ComputeLevels();
 
   // Dynamic upmix helpers: detect stereo content in a multichannel stream and extract FL+FR.
@@ -147,6 +149,8 @@ private:
   // surround-upmix pipeline (used when upmix == Surround and input is <= 2ch)
   bool             useFilter_ = false;
   bool             useDts_ = false;
+  bool             timeDomain_ = false;
+  float            lfeFilterState_ = 0.0f;
   AVFilterGraph*   graph_     = nullptr;
   AVFilterContext* fsrc_      = nullptr; // abuffer
   AVFilterContext* fsink_     = nullptr; // abuffersink

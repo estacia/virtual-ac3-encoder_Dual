@@ -227,6 +227,9 @@ void WasapiCapture::ThreadProc()
 {
   DWORD taskIndex = 0;
   HANDLE mmcss = AvSetMmThreadCharacteristicsW(L"Pro Audio", &taskIndex);
+  if (mmcss && !AvSetMmThreadPriority(mmcss, AVRT_PRIORITY_HIGH))
+    std::fprintf(stderr, "[WasapiCapture] AvSetMmThreadPriority(HIGH) failed: %lu\n",
+                 GetLastError());
 
   const size_t bpf = fmt_.bytesPerFrame();
   auto recordError = [&]() {
