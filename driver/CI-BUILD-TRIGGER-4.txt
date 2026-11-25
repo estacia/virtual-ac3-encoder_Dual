@@ -1,0 +1,1 @@
+Follow-up sync event to ensure the WDK validation workflow runs against the latest main branch toolchain setup.
