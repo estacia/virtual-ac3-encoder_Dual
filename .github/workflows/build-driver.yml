@@ -35,7 +35,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          msbuild .\driver\SimpleAudioSample.sln /m /p:Configuration=Release /p:Platform=x64 /v:minimal
+          msbuild .\driver\SimpleAudioSample.sln -restore /m /p:Configuration=Release /p:Platform=x64 /v:minimal
           if ($LASTEXITCODE -ne 0) { throw "MSBuild failed with exit code $LASTEXITCODE" }
 
       - name: Collect driver package
