@@ -287,12 +287,13 @@ bool WasapiPassthrough::InitExclusive(int rate)
   HR_FAIL(client_->SetEventHandle(dataEvent_), "SetEventHandle");
   HR_FAIL(client_->GetService(__uuidof(IAudioRenderClient), &render_), "GetService(IAudioRenderClient)");
 
-  std::printf("[WasapiPassthrough] render buffer=%u frames (~%.2f ms); %s burst=%d frames spans %.2f cycles; "
+  std::printf("[WasapiPassthrough] render buffer=%u frames (~%.2f ms); %s burst=%d frames spans %.2f cycles%s; "
               "accepted Initialize=%.2f ms\n",
               bufferFrames_, 1000.0 * bufferFrames_ / rate,
               dtsMode ? "DTS" : "AC-3", framesPerPacket_,
               static_cast<double>(framesPerPacket_) / bufferFrames_,
-              fullBurstFallback ? " (full-burst fallback)" : "");
+              fullBurstFallback ? " (full-burst fallback)" : "",
+              acceptedHns / 10000.0);
   return true;
 }
 
@@ -704,4 +705,3 @@ void WasapiPassthrough::ThreadProc()
   }
   if (mmcss) AvRevertMmThreadCharacteristics(mmcss);
 }
-} // namespace
