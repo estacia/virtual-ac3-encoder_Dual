@@ -5,6 +5,11 @@
     <_NuGetTargetFallbackMoniker>$(_NuGetTargetFallbackMoniker);native,Version=v0.0</_NuGetTargetFallbackMoniker>
     <WDKVersion>10.0.28000.2526</WDKVersion>
     <WindowsTargetPlatformVersion>10.0.28000.0</WindowsTargetPlatformVersion>
+
+    <!-- Use the WDK content and tools restored from NuGet, not a machine-wide WDK install. -->
+    <WDKContentRoot>$(NuGetPackageRoot)microsoft.windows.wdk.x64\$(WDKVersion)\c\</WDKContentRoot>
+    <WDKBinRoot>$(WDKContentRoot)bin\10.0.28000.0</WDKBinRoot>
+    <InfToolPath>$(WDKBinRoot)\x64\</InfToolPath>
   </PropertyGroup>
   <ItemGroup Label="WDK Dependencies">
     <PackageReference Include="Microsoft.Windows.WDK.x64" Version="$(WDKVersion)">
