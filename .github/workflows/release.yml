@@ -18,7 +18,6 @@ concurrency:
 
 jobs:
   release:
-    if: ${{ github.event_name != 'push' || !contains(github.event.head_commit.message, '[release-cleanup]') }}
     name: Build + tag + release
     runs-on: windows-2022
     steps:
