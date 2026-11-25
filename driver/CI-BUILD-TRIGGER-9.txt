@@ -1,0 +1,1 @@
+Trigger WDK validation using 64-bit MSBuild host architecture.
