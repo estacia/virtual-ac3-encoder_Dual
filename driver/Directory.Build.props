@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup Label="WDK NuGet">
+    <!-- Enable PackageReference restore for native Visual C++ projects. -->
+    <_NuGetTargetFallbackMoniker>$(_NuGetTargetFallbackMoniker);native,Version=v0.0</_NuGetTargetFallbackMoniker>
+    <WDKVersion>10.0.28000.2526</WDKVersion>
+    <WindowsTargetPlatformVersion>10.0.28000.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <ItemGroup Label="WDK Dependencies">
+    <PackageReference Include="Microsoft.Windows.WDK.x64" Version="$(WDKVersion)">
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+  </ItemGroup>
+</Project>
