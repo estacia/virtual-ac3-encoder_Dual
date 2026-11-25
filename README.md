@@ -14,10 +14,11 @@ A real-time Windows 10/11 software implementation of **Dolby Digital Live (DDL)*
 | Feature | Details |
 | :--- | :--- |
 | **Multi-Format Digital Output** | **DTS Core 5.1** (`1536 kbps` full-rate / `768 kbps` half-rate), **Dolby Digital AC-3 5.1** (`640 kbps` / `448 kbps`), and **PCM Stereo 2.0** over **Toslink Optical (S/PDIF)** or **HDMI ARC**. |
-| **Smart Multi-Layout Upmixing (`5.1` / `3.1` / `3.0` / `2.1`)** | **Dynamic Surround 5.1** (auto-detects stereo inside 5.1 streams and upmixes to all 6 speakers while passing true discrete 5.1 untouched), **Front Stage 3.1** (`FL+FR+C+LFE`), **Front Stage 3.0** (`FL+FR+C`, ideal for 3.0 HDMI ARC soundbars), **Stereo + Sub 2.1** (`FL+FR+LFE`), **Always 5.1 / 3.1**, or **Off**. |
+| **Smart Multi-Layout Upmixing (`5.1` / `3.1` / `3.0` / `2.1`)** | **Dynamic Surround 5.1** (auto-detects stereo inside 5.1 streams, bypasses FFT while discrete 5.1 channels are active, and pre-warms during the native-layout hold), **Dual Stereo Copy** (direct `FL->SL` / `FR->SR` copy for stereo music, with no matrix/FFT upmix and native 5.1 untouched), **Front Stage 3.1** (`FL+FR+C+LFE`), **Front Stage 3.0** (`FL+FR+C`, ideal for 3.0 HDMI ARC soundbars), **Stereo + Sub 2.1** (`FL+FR+LFE`), **Always 5.1 / 3.1**, or **Off**. |
+| **Dynamic Surround Filter Diagnostics** | Reports FFT filter state, 2048-sample hop size, and live FIFO occupancy. Dynamic filter buffering is capped to one FFT hop plus one codec packet. |
 | **Dolby Control Center (DX11 GUI)** | Hardware-accelerated **Dear ImGui + DirectX 11** dark studio UI with **60 FPS 6-channel VU meters** (peak hold + dB readouts), per-speaker level trims (`-60 dB` to `0 dB` + mute), live hot-reload (zero audio interruption when changing modes/trims), and system tray integration. |
-| **5-Tier Latency Presets** | **Extreme** (`~3 ms`), **Fast** (`~7 ms`), **Balanced** (`~12 ms`, default), **Safe** (`~20 ms`), and **Relaxed** (`~35 ms`), backed by a lock-free SPSC ring buffer and master-clock drift compensation. |
-| **Flexible Audio Capture** | Works out-of-the-box with **Secure Boot ON** via **[VB-CABLE](https://vb-audio.com/Cable/)** (WASAPI loopback or recording capture), or with the included **WDK WaveRT Virtual 5.1 Driver** (`driver/`). |
+| **5-Tier Latency Presets** | **Extreme**, **Fast**, **Balanced** (default), **Safe**, and **Relaxed** select progressively larger pre-roll cushions. Shared capture uses event-driven WASAPI; direct recording-endpoint capture requests a 5 ms (or 10 ms for Safe/Relaxed) IAudioClient3 period when supported, with automatic fallback. Loopback remains available for comparison. The engine automatically reopens invalidated endpoints with bounded retry backoff, and the GUI exposes capture-drop, output-underrun, drift-trim, and WASAPI-error counters. |
+| **Flexible Audio Capture** | Event-driven loopback capture on Windows 10 1703+ (with a short compatibility poll on older Windows); works out-of-the-box with **Secure Boot ON** via **[VB-CABLE](https://vb-audio.com/Cable/)** (WASAPI loopback or recording capture), or with the included **WDK WaveRT Virtual 5.1 Driver** (`driver/`). |
 
 ---
 
@@ -70,6 +71,7 @@ flowchart TD
     In["Incoming PCM Frame\n(2.0 Stereo or 5.1 Multichannel)"] --> Mode{"Selected Upmix Mode"}
 
     Mode -->|Off| SwrPass["libswresample Rematrix\n(Direct Pass-Through)"]
+    Mode -->|Dual Stereo Copy| Copy["Direct Copy: FL->SL, FR->SR\n(Center/LFE silent; native 5.1 untouched)"]
     Mode -->|Always 5.1| Filt51["FFmpeg surround Filter Graph\n(Full 5.1: FL, FR, C, LFE, SL, SR)"]
     Mode -->|Always Front Stage 3.1| Filt31["FFmpeg surround Filter Graph\n(3.1 Stage: FL, FR, C, LFE | SL/SR Muted)"]
 
@@ -85,6 +87,7 @@ flowchart TD
     StageChoice -->|Stereo + Sub 2.1| Filt21["2.1 Stage: FL, FR + LFE Bass\n(Center Folded to L/R, C & SL/SR Muted)"]
 
     SwrPass --> Gains["Per-Speaker Gain Trims (-60..0 dB)\n& 6-Channel Peak/RMS Metering"]
+    Copy --> Gains
     Filt51 --> Gains
     Filt31 --> Gains
     Filt30 --> Gains
@@ -122,6 +125,7 @@ Download the latest release from **[Releases](https://github.com/PatalJunior/vir
 - **Front Stage 3.0 (HDMI ARC / Soundbar)**: Dynamically steers vocals to the **Center** speaker alongside **Front Left & Right** while keeping both Subwoofer (LFE) and rear surrounds silent — ideal for 3.0 soundbars and LCR setups without a dedicated subwoofer.
 - **Stereo + Sub 2.1 (Bookshelf + Subwoofer)**: Extracts low-frequency bass (`< 140 Hz`) to the **Subwoofer (LFE)** while folding centered vocals back into **Front Left & Right** and keeping Center and rear surrounds silent.
 - **Always Surround 5.1 / Always Front Stage 3.1**: Forces upmixing unconditionally on all inputs.
+- **Dual Stereo Copy**: For stereo sources, copies Front Left directly to Surround Left and Front Right directly to Surround Right. Center and LFE are silent. The mode uses no matrix/FFT upmix filter and leaves detected native 5.1 content unchanged.
 - **Off**: Pure 1:1 channel mapping with no upmix filter.
 
 ### Speaker Level Trims & Master Release
@@ -154,12 +158,13 @@ engine.exe --in "CABLE Output" --out-spdif --bitrate 640000 --upmix surround
 | `--probe` | Query `IAudioClient::IsFormatSupported` for IEC 61937 AC-3 support on all render endpoints. |
 | `--mon` | Run a 5-second capture-only throughput diagnostic. |
 | `--loopback` | Capture `--in` as a *render* endpoint via WASAPI loopback (default for `CABLE Input` / virtual driver). |
+| `--direct-capture` | Capture `--in` from a *recording* endpoint (e.g. `CABLE Output`); requests IAudioClient3 when supported. Use this to compare latency with loopback. |
 | `--in <name>` / `--in-id <id>` | Capture device friendly-name substring or exact endpoint ID. |
 | `--out <name>` / `--out-id <id>` | Optical output device friendly-name substring or exact endpoint ID. |
 | `--out-spdif` | Automatically pick the first render endpoint with an `SPDIF` form factor. |
 | `--bitrate <bps>` | AC-3 bitrate (`640000` or `448000`). |
 | `--safe <frames>` | Target ring-buffer drift floor in sample frames. |
-| `--upmix <mode>` | `surround` (`5.1`), `front` (`3.1`), `3.0`, `2.1`, `always`, `always_front`, or `off`. |
+| `--upmix <mode>` | `surround` (`5.1`), `dual_stereo` (direct L/R copy to rears), `front` (`3.1`), `3.0`, `2.1`, `always`, `always_front`, or `off`. |
 | `--config <path>` | Path to config file (defaults to `virtual-ac3-encoder.conf` next to `engine.exe`). |
 | `--hidden` / `--log <path>` | Run with hidden console window / append output to log file. |
 

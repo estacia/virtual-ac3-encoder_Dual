@@ -88,7 +88,7 @@ int g_outputMode = 0; // 0=DTS 5.1, 1=AC3 5.1, 2=PCM Stereo
 int g_dtsBitrate = 0; // 0=Full 1536k, 1=Half 768k
 int g_ac3Bitrate = 0; // 0=640k, 1=448k
 int g_latencyPreset = 2; // 0=Extreme, 1=Fast, 2=Balanced, 3=Safe, 4=Relaxed
-int g_upmixMode = 0; // 0=Dynamic Surround (Auto), 1=Always Surround, 2=Off
+int g_upmixMode = 0; // 0=Dynamic Surround, 6=Dual Stereo Copy, 7=Off
 bool g_loopback = true;
 bool g_outAutoSpdif = true;
 int  g_reloadId = 1;
@@ -395,21 +395,23 @@ void SaveConfiguration(int reloadId = 0) {
     Kv cfg = ReadKv(g_configPath);
 
     const auto& inDevs = g_loopback ? g_renderDevices : g_captureDevices;
-    if (g_selectedInDevice >= 0 && static_cast<size_t>(g_selectedInDevice) < inDevs.size())
+    if (g_selectedInDevice >= 0 && static_cast<size_t>(g_selectedInDevice) < inDevs.size()) {
         cfg["in_id"] = ToUtf8(inDevs[static_cast<size_t>(g_selectedInDevice)].id);
+        cfg["in"] = ToUtf8(inDevs[static_cast<size_t>(g_selectedInDevice)].name);
+    }
 
     if (g_outAutoSpdif) {
         cfg["out_spdif"] = "1";
         cfg.erase("out_id");
         cfg.erase("out");
     } else {
-        if (g_selectedOutDevice >= 0 && static_cast<size_t>(g_selectedOutDevice) < g_renderDevices.size())
+        if (g_selectedOutDevice >= 0 && static_cast<size_t>(g_selectedOutDevice) < g_renderDevices.size()) {
             cfg["out_id"] = ToUtf8(g_renderDevices[static_cast<size_t>(g_selectedOutDevice)].id);
+            cfg["out"] = ToUtf8(g_renderDevices[static_cast<size_t>(g_selectedOutDevice)].name);
+        }
         cfg.erase("out_spdif");
-        cfg.erase("out");
     }
 
-    cfg.erase("in");
     cfg["loopback"] = g_loopback ? "1" : "0";
 
     if (g_outputMode == 0) {
@@ -426,8 +428,8 @@ void SaveConfiguration(int reloadId = 0) {
     cfg["latency"] = latencies[std::clamp(g_latencyPreset, 0, 4)];
     cfg.erase("safe"); // Use preset
 
-    const char* upmixes[] = {"dynamic", "front", "3.0", "2.1", "always", "always_front", "off"};
-    cfg["upmix"] = upmixes[std::clamp(g_upmixMode, 0, 6)];
+    const char* upmixes[] = {"dynamic", "front", "3.0", "2.1", "always", "always_front", "dual_stereo", "off"};
+    cfg["upmix"] = upmixes[std::clamp(g_upmixMode, 0, 7)];
 
     WriteKvAtomic(g_configPath, cfg);
     WriteControlFile(false, reloadId);
@@ -451,11 +453,15 @@ void LoadConfiguration() {
 
     const auto& inDevs = g_loopback ? g_renderDevices : g_captureDevices;
     g_selectedInDevice = FindDeviceById(inDevs, cfg["in_id"]);
+    if (g_selectedInDevice < 0 && !cfg["in"].empty())
+        g_selectedInDevice = FindDeviceBySubstring(inDevs, cfg["in"]);
     if (g_selectedInDevice < 0)
         g_selectedInDevice = FindDeviceBySubstring(inDevs, g_loopback ? "CABLE Input" : "CABLE Output");
     if (g_selectedInDevice < 0 && !inDevs.empty()) g_selectedInDevice = 0;
 
     g_selectedOutDevice = FindDeviceById(g_renderDevices, cfg["out_id"]);
+    if (g_selectedOutDevice < 0 && !cfg["out"].empty())
+        g_selectedOutDevice = FindDeviceBySubstring(g_renderDevices, cfg["out"]);
     if (g_selectedOutDevice < 0)
         g_selectedOutDevice = FindDeviceBySubstring(g_renderDevices, "Realtek Digital");
     if (g_selectedOutDevice < 0 && !g_renderDevices.empty()) g_selectedOutDevice = 0;
@@ -479,7 +485,8 @@ void LoadConfiguration() {
     else g_latencyPreset = 2; // balanced
 
     const std::string up = cfg["upmix"];
-    if (up == "off") g_upmixMode = 6;
+    if (up == "off") g_upmixMode = 7;
+    else if (up == "dual_stereo" || up == "dual-stereo" || up == "copy") g_upmixMode = 6;
     else if (up == "always_front" || up == "always_3.1") g_upmixMode = 5;
     else if (up == "always") g_upmixMode = 4;
     else if (up == "2.1" || up == "stereo_sub") g_upmixMode = 3;
@@ -1029,6 +1036,67 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int) {
         DrawSpeakerVUMeters(isRunning);
 
         ImGui::Spacing();
+        if (ImGui::CollapsingHeader("STREAM DIAGNOSTICS")) {
+            const MeterSharedState* state = g_meterMem.IsOpen() ? g_meterMem.Get() : nullptr;
+            if (state && state->version >= 3) {
+                const auto readCounter = [](const volatile LONG64* value) {
+                    return static_cast<unsigned long long>(
+                        InterlockedCompareExchange64(const_cast<volatile LONG64*>(value), 0, 0));
+                };
+                const unsigned long long dropped = readCounter(&state->captureDroppedFrames);
+                const unsigned long long underrunFrames = readCounter(&state->outputUnderrunFrames);
+                const unsigned long long underrunPackets = readCounter(&state->outputUnderrunPackets);
+                const unsigned long long wasapiErrors = readCounter(&state->wasapiErrorCount);
+                const unsigned long long eventTimeouts = readCounter(&state->eventTimeoutCount);
+                const unsigned long long driftTrim = readCounter(&state->driftTrimFrames);
+                const unsigned long long ringFill = readCounter(&state->ringFillFrames);
+                const unsigned long long ringPeak = readCounter(&state->ringPeakFrames);
+                const unsigned int ringCapacity = static_cast<unsigned int>(
+                    InterlockedCompareExchange(const_cast<volatile LONG*>(&state->ringCapacityFrames), 0, 0));
+                const double rate = state->sampleRate ? static_cast<double>(state->sampleRate) : 48000.0;
+                ImGui::Text("Capture dropped: %llu frames (%.2f ms)",
+                    dropped, 1000.0 * static_cast<double>(dropped) / rate);
+                ImGui::Text("Output underruns: %llu frames / %llu packets (%.2f ms)",
+                    underrunFrames, underrunPackets,
+                    1000.0 * static_cast<double>(underrunFrames) / rate);
+                ImGui::Text("WASAPI errors: %llu | Render event timeouts: %llu",
+                    wasapiErrors, eventTimeouts);
+                ImGui::Text("Drift correction: %llu frames (%.2f ms)",
+                    driftTrim, 1000.0 * static_cast<double>(driftTrim) / rate);
+                ImGui::Text("Ring fill: %llu / %u frames | peak: %llu frames",
+                    ringFill, ringCapacity, ringPeak);
+
+                const LONG filterState = InterlockedCompareExchange(
+                    const_cast<volatile LONG*>(&state->surroundFilterState), 0, 0);
+                const LONG filterHop = InterlockedCompareExchange(
+                    const_cast<volatile LONG*>(&state->surroundFilterHopFrames), 0, 0);
+                const unsigned long long filterFifo = readCounter(&state->surroundFilterFifoFrames);
+                const LONG filterTarget = InterlockedCompareExchange(
+                    const_cast<volatile LONG*>(&state->surroundFilterTargetFrames), 0, 0);
+                const char* filterLabel = "Disabled";
+                switch (filterState) {
+                    case 1: filterLabel = "Stereo FFT upmix"; break;
+                    case 2: filterLabel = "Dynamic stereo FFT upmix"; break;
+                    case 3: filterLabel = "FFT warm-up"; break;
+                    case 4: filterLabel = "Native 5.1 - FFT bypassed"; break;
+                    case 5: filterLabel = "Native hold - FFT pre-warmed"; break;
+                    default: break;
+                }
+                ImGui::Text("Surround filter: %s", filterLabel);
+                if (filterHop > 0) {
+                    ImGui::Text("FFT hop: %ld frames (%.2f ms) | FIFO: %llu / %ld frames (%.2f / %.2f ms)",
+                        filterHop, 1000.0 * static_cast<double>(filterHop) / rate,
+                        filterFifo, filterTarget,
+                        1000.0 * static_cast<double>(filterFifo) / rate,
+                        1000.0 * static_cast<double>(filterTarget) / rate);
+                    ImGui::TextDisabled("FFT hop/FIFO figures describe the upmix filter only, not total output latency.");
+                }
+            } else {
+                ImGui::TextDisabled("Waiting for engine telemetry (restart the audio engine if needed).");
+            }
+        }
+
+        ImGui::Spacing();
         ImGui::Separator();
         ImGui::Spacing();
 
@@ -1042,7 +1110,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int) {
                 TriggerApplySettings();
             }
             ImGui::SameLine();
-            ImGui::TextDisabled(g_loopback ? "(Captures Playback device, e.g. CABLE Input)" : "(Captures Recording endpoint, e.g. Mics / CABLE Output)");
+            ImGui::TextDisabled(g_loopback ? "(Loopback path; compare with direct capture for latency)" : "(Direct capture; requests 5 ms IAudioClient3 when supported)");
 
             const auto& inDevs = g_loopback ? g_renderDevices : g_captureDevices;
 
@@ -1148,11 +1216,11 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int) {
 
             // Latency Presets
             const char* latencies[] = {
-                "Extreme (~3 ms / 128 smp) - High-End PC Only",
-                "Fast (~7 ms / 256 smp) - Competitive Gaming",
-                "Balanced (~12 ms / 512 smp) - Recommended",
-                "Safe (~20 ms / 768 smp) - High Stability",
-                "Relaxed (~35 ms / 1536 smp) - Conservative / Laptop"
+                "Extreme (AC-3/DTS: 256/512 samples) - Lowest Cushion",
+                "Fast (384/640 samples) - Low Latency",
+                "Balanced (512/768 samples) - Recommended",
+                "Safe (768/1024 samples) - High Stability",
+                "Relaxed (1024/1536 samples) - Conservative"
             };
             if (ImGui::Combo("Latency Preset", &g_latencyPreset, latencies, IM_ARRAYSIZE(latencies))) {
                 TriggerApplySettings();
@@ -1166,6 +1234,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int) {
                 "Stereo + Sub 2.1 (Front L/R + Subwoofer / LFE, Center & Rears Silent)",
                 "Always Surround 5.1 (Forced 5.1 on All Audio)",
                 "Always Front Stage 3.1 (Forced 3.1 on All Audio - Rears Silent)",
+                "Dual Stereo Copy (FL->SL / FR->SR, No Upmix, Native 5.1 Untouched)",
                 "Off (Pure Stereo 2.0: Front L/R Only, Center & Sub Silent)"
             };
             if (ImGui::Combo("Stereo Upmix", &g_upmixMode, upmixes, IM_ARRAYSIZE(upmixes))) {

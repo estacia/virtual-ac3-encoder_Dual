@@ -34,6 +34,19 @@ class SpdifEncoder
 public:
   enum class Codec { AC3, DTS };
 
+  // State reported by the live stream diagnostics panel.
+  enum class FilterStatus : uint32_t
+  {
+    Disabled = 0,
+    StereoUpmix = 1,
+    DynamicStereo = 2,
+    Warming = 3,
+    NativeBypass = 4,
+    HoldPrewarm = 5,
+  };
+
+  static constexpr int kSurroundFilterHopFrames = 2048;
+
   SpdifEncoder();
   ~SpdifEncoder();
   SpdifEncoder(const SpdifEncoder&) = delete;
@@ -47,6 +60,7 @@ public:
   // - StereoSub21: auto-detects non-surround sources and upmixes to 2.1 (Front L/R + Sub/LFE, Center & rears silent)
   // - Always: forces 5.1 surround upmixing unconditionally on all inputs
   // - AlwaysFront: forces 3.1 upmixing (Center + Sub/LFE) unconditionally on all inputs
+  // - DualStereo: copies FL->SL and FR->SR for stereo content; native multichannel passes through.
   enum class Upmix
   {
     Off,
@@ -56,6 +70,7 @@ public:
     StereoSub21,  // Dynamic 2.1 (FL+FR+LFE, Center & rears silent)
     Always,       // Forced 5.1 on all audio
     AlwaysFront,  // Forced 3.1 on all audio
+    DualStereo,   // Direct stereo copy: FL->SL, FR->SR; Center/LFE silent; native 5.1 untouched
   };
 
   struct Params
@@ -85,6 +100,12 @@ public:
   // Channels expected in the interleaved input (== inLayout.nb_channels).
   int InChannels() const { return inLayout_.nb_channels; }
 
+  FilterStatus GetFilterStatus() const;
+  uint32_t FilterFifoFrames() const;
+  uint32_t FilterFifoTargetFrames() const;
+  uint32_t FilterHopFrames() const;
+  uint64_t FilterProcessedFrames() const { return filterInputFramesProcessed_; }
+
   // An IEC 61937 AC3 burst is 6144 bytes; DTS burst is 2048 bytes.
   static constexpr int kMaxBytesPerPacket = 6144;
 
@@ -107,7 +128,7 @@ private:
   void ComputeLevels();
 
   // Dynamic upmix helpers: detect stereo content in a multichannel stream and extract FL+FR.
-  bool IsEffectivelyStereo(const uint8_t* in) const;
+  bool IsEffectivelyStereo(const uint8_t* in, bool* hasDiscreteActivity = nullptr) const;
   void ExtractStereo(const uint8_t* in, uint8_t* out) const;
 
   mutable std::array<std::atomic<float>, 6> peakLevels_{};
@@ -116,6 +137,7 @@ private:
   AVCodecContext*  codecCtx_ = nullptr;
   AVFormatContext* muxer_    = nullptr;
   SwrContext*      swr_      = nullptr;
+  SwrContext*      dualStereoSwr_ = nullptr; // two-channel conversion fast path for Dual Stereo Copy
   SwrContext*      dtsS32Swr_ = nullptr; // FLTP to packed S32 for DTS
   AVFrame*         frame_    = nullptr;  // planar-float processing frame
   AVFrame*         dtsFrame_  = nullptr;  // packed S32 frame for the DTS encoder
@@ -132,9 +154,17 @@ private:
 
   // Dynamic upmix: input is multichannel (e.g. 5.1 cable) but we detect at runtime
   // whether the content is actually stereo (non-FL/FR channels silent) and upmix it.
-  // Both the filter graph (stereo input) and swr (multichannel passthrough) stay live.
+  // The FFT graph handles front-only content; it is bypassed while discrete 5.1
+  // channels are active and pre-warmed during the existing native-layout hold.
   bool             dynamicUpmix_ = false;
   bool             alwaysUpmix_ = false;
+  bool             dualStereo_ = false; // direct L/R copy to rear channels for stereo sources
+  bool             dynamicFilterBypassed_ = false;
+  bool             dynamicFilterNeedsWarmup_ = false;
+  bool             dynamicFilterPrimed_ = false;
+  bool             dynamicFilterActive_ = false;
+  int              dynamicFilterWarmupFrames_ = 0;
+  uint64_t         filterInputFramesProcessed_ = 0;
   Upmix            upmixMode_ = Upmix::Off;
   mutable bool     effectivelyStereo_ = true;
   mutable int      multichannelHoldFrames_ = 0; // hysteresis hold for native 5.1 streams

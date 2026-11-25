@@ -110,12 +110,14 @@ bool WasapiPassthrough::ProbeDts(IMMDevice* dev, int rate)
   return c->IsFormatSupported(AUDCLNT_SHAREMODE_EXCLUSIVE, &w.FormatExt.Format, nullptr) == S_OK;
 }
 bool WasapiPassthrough::Init(IMMDevice* dev, RingBuffer* ring, const CaptureFormat& capFmt,
-                             const Params& p)
+                             const Params& p, AudioDiagnostics* diagnostics)
 {
   dev_ = dev;
   ring_ = ring;
   capFmt_ = capFmt;
   params_ = p;
+  diagnostics_ = diagnostics;
+  failed_.store(false, std::memory_order_relaxed);
   capBytesPerFrame_ = capFmt.bytesPerFrame();
 
   const int rate = static_cast<int>(capFmt.sampleRate);
@@ -317,6 +319,14 @@ bool WasapiPassthrough::EncodeIntoBuffer(BYTE* out)
     }
     else
     {
+      // Startup pre-roll is intentional silence. Count only starvation after the stream
+      // has primed, so diagnostics reflect actual playback underruns rather than startup.
+      if (primed_ && diagnostics_)
+      {
+        diagnostics_->outputUnderrunFrames.fetch_add(
+            static_cast<uint64_t>(framesPerPacket_), std::memory_order_relaxed);
+        diagnostics_->outputUnderrunPackets.fetch_add(1, std::memory_order_relaxed);
+      }
       // If the buffer underruns, reset primed state only if the ring buffer is completely starved.
       if (ring_->BytesAvailable() == 0)
         primed_ = false;
@@ -350,36 +360,62 @@ bool WasapiPassthrough::EncodeIntoBuffer(BYTE* out)
 
 bool WasapiPassthrough::Start()
 {
-  if (running_.exchange(true))
+  if (!client_ || !render_ || !dataEvent_ || !stopEvent_)
+  {
+    std::fprintf(stderr, "[WasapiPassthrough] Start requested before successful Init\n");
+    return false;
+  }
+  if (running_.exchange(true, std::memory_order_relaxed))
     return true;
+  failed_.store(false, std::memory_order_relaxed);
   ResetEvent(stopEvent_);
   cycle_ = 0;
   minAvail_ = 0xFFFFFFFFu;
   primed_ = false;
 
-  // Pre-fill the first buffer (primes the encoder and avoids an initial underrun) before Start.
   BYTE* out = nullptr;
-  if (SUCCEEDED(render_->GetBuffer(bufferFrames_, &out)))
+  HRESULT hr = render_->GetBuffer(bufferFrames_, &out);
+  if (FAILED(hr) || !out)
   {
-    const bool hadAudio = EncodeIntoBuffer(out);
-    render_->ReleaseBuffer(bufferFrames_, 0);
+    failed_.store(true, std::memory_order_relaxed);
+    running_.store(false, std::memory_order_relaxed);
+    if (diagnostics_) diagnostics_->outputWasapiErrors.fetch_add(1, std::memory_order_relaxed);
+    std::fprintf(stderr, "[WasapiPassthrough] initial GetBuffer failed: %s\n", HrStr(hr).c_str());
+    return false;
+  }
 
-    if (sharedMem_.IsOpen())
+  const bool hadAudio = EncodeIntoBuffer(out);
+  hr = render_->ReleaseBuffer(bufferFrames_, 0);
+  if (FAILED(hr))
+  {
+    failed_.store(true, std::memory_order_relaxed);
+    running_.store(false, std::memory_order_relaxed);
+    if (diagnostics_) diagnostics_->outputWasapiErrors.fetch_add(1, std::memory_order_relaxed);
+    std::fprintf(stderr, "[WasapiPassthrough] initial ReleaseBuffer failed: %s\n", HrStr(hr).c_str());
+    return false;
+  }
+
+  if (sharedMem_.IsOpen())
+  {
+    MeterSharedState* ms = sharedMem_.Get();
+    if (ms)
     {
-      MeterSharedState* ms = sharedMem_.Get();
-      if (ms)
-      {
-        if (hadAudio)
-        {
-          enc_.GetChannelLevels(ms->peakLevels, ms->rmsLevels);
-        }
-        ms->active = 1;
-        ms->frameCounter++;
-      }
+      if (hadAudio) enc_.GetChannelLevels(ms->peakLevels, ms->rmsLevels);
+      ms->active = 1;
+      ms->frameCounter++;
     }
   }
 
-  HR_FAIL(client_->Start(), "client Start");
+  hr = client_->Start();
+  if (FAILED(hr))
+  {
+    failed_.store(true, std::memory_order_relaxed);
+    running_.store(false, std::memory_order_relaxed);
+    if (diagnostics_) diagnostics_->outputWasapiErrors.fetch_add(1, std::memory_order_relaxed);
+    std::fprintf(stderr, "[WasapiPassthrough] client Start failed: %s\n", HrStr(hr).c_str());
+    return false;
+  }
+
   if (sharedMem_.IsOpen())
   {
     MeterSharedState* ms = sharedMem_.Get();
@@ -392,14 +428,14 @@ bool WasapiPassthrough::Start()
       ms->safeFrames = params_.safeFrames;
     }
   }
+  PublishDiagnostics();
   thread_ = std::thread(&WasapiPassthrough::ThreadProc, this);
   return true;
 }
 
 void WasapiPassthrough::Stop()
 {
-  if (!running_.exchange(false))
-    return;
+  const bool wasRunning = running_.exchange(false, std::memory_order_relaxed);
   primed_ = false;
   if (sharedMem_.IsOpen())
   {
@@ -407,19 +443,40 @@ void WasapiPassthrough::Stop()
     if (ms)
     {
       ms->active = 0;
+      InterlockedExchange(&ms->surroundFilterState, 0);
+      InterlockedExchange(&ms->surroundFilterHopFrames, 0);
+      InterlockedExchange64(&ms->surroundFilterFifoFrames, 0);
+      InterlockedExchange(&ms->surroundFilterTargetFrames, 0);
       for (int i = 0; i < 6; ++i) { ms->peakLevels[i] = 0.0f; ms->rmsLevels[i] = 0.0f; }
     }
   }
-  if (stopEvent_) SetEvent(stopEvent_);
+  if (wasRunning && stopEvent_) SetEvent(stopEvent_);
   if (thread_.joinable()) thread_.join();
   if (client_) {
-    client_->Stop();
+    if (wasRunning) client_->Stop();
     client_.Reset();
   }
   render_.Reset();
   dev_.Reset();
   if (dataEvent_) { CloseHandle(dataEvent_); dataEvent_ = nullptr; }
   if (stopEvent_) { CloseHandle(stopEvent_); stopEvent_ = nullptr; }
+}
+
+void WasapiPassthrough::PublishDiagnostics()
+{
+  if (!sharedMem_.IsOpen() || !diagnostics_) return;
+  MeterSharedState* state = sharedMem_.Get();
+  PublishAudioDiagnostics(state, diagnostics_, ring_ ? ring_->BytesAvailable() : 0,
+                          ring_ ? ring_->Capacity() : 0, capBytesPerFrame_);
+  if (!state) return;
+  InterlockedExchange(&state->surroundFilterState,
+      static_cast<LONG>(enc_.GetFilterStatus()));
+  InterlockedExchange(&state->surroundFilterHopFrames,
+      static_cast<LONG>(enc_.FilterHopFrames()));
+  InterlockedExchange64(&state->surroundFilterFifoFrames,
+      static_cast<LONG64>(enc_.FilterFifoFrames()));
+  InterlockedExchange(&state->surroundFilterTargetFrames,
+      static_cast<LONG>(enc_.FilterFifoTargetFrames()));
 }
 
 void WasapiPassthrough::ThreadProc()
@@ -430,20 +487,41 @@ void WasapiPassthrough::ThreadProc()
   const uint32_t required = static_cast<uint32_t>(burstsPerCycle_) * framesPerPacket_;
   const uint32_t desired = required + params_.safeFrames;
   HANDLE waits[2] = { dataEvent_, stopEvent_ };
+  unsigned consecutiveTimeouts = 0;
 
   while (running_.load(std::memory_order_relaxed))
   {
-    DWORD wr = WaitForMultipleObjects(2, waits, FALSE, 2000);
+    const DWORD wr = WaitForMultipleObjects(2, waits, FALSE, 2000);
     if (wr == WAIT_OBJECT_0 + 1)
       break;
     if (wr == WAIT_TIMEOUT)
     {
-      std::fprintf(stderr, "[WasapiPassthrough] render event timed out\n");
+      if (diagnostics_) diagnostics_->eventTimeouts.fetch_add(1, std::memory_order_relaxed);
+      if (++consecutiveTimeouts >= 2)
+      {
+        failed_.store(true, std::memory_order_relaxed);
+        if (diagnostics_) diagnostics_->outputWasapiErrors.fetch_add(1, std::memory_order_relaxed);
+        std::fprintf(stderr, "[WasapiPassthrough] repeated render event timeouts; requesting restart\n");
+        break;
+      }
       continue;
     }
+    if (wr == WAIT_FAILED)
+    {
+      failed_.store(true, std::memory_order_relaxed);
+      if (diagnostics_) diagnostics_->outputWasapiErrors.fetch_add(1, std::memory_order_relaxed);
+      std::fprintf(stderr, "[WasapiPassthrough] render event wait failed: %lu\n", GetLastError());
+      break;
+    }
+    if (wr != WAIT_OBJECT_0)
+    {
+      failed_.store(true, std::memory_order_relaxed);
+      if (diagnostics_) diagnostics_->outputWasapiErrors.fetch_add(1, std::memory_order_relaxed);
+      break;
+    }
+    consecutiveTimeouts = 0;
 
     // --- drift control (SoundPusher style with hysteresis & gentle step-trimming) ---
-    // Only apply drift trimming when the stream is actively playing audio (primed_).
     if (primed_)
     {
       const uint32_t avail =
@@ -451,19 +529,19 @@ void WasapiPassthrough::ThreadProc()
       if (avail < minAvail_)
         minAvail_ = avail;
 
-      // Evaluate drift over a ~2-second window (e.g. 64 cycles for AC3 @ 32ms, 192 cycles for DTS @ 10.6ms)
-      const uint32_t driftCycles = (framesPerPacket_ <= 512) ? 192 : 64;
+      const uint32_t driftCycles = (framesPerPacket_ <= 512) ? 96 : 32;
       if (cycle_++ % driftCycles == 0)
       {
-        // Only trim if the MINIMUM available buffer over the entire window has exceeded desired + hysteresis.
-        // This deadband ensures that normal OS thread scheduling jitter (+-3-5 ms) never causes an underrun.
-        const uint32_t hysteresis = std::max<uint32_t>(static_cast<uint32_t>(framesPerPacket_) * 2, 1024u);
+        const uint32_t hysteresis =
+            std::max<uint32_t>(static_cast<uint32_t>(framesPerPacket_), params_.safeFrames);
         if (minAvail_ != 0xFFFFFFFFu && minAvail_ > desired + hysteresis)
         {
           const uint32_t excess = minAvail_ - (desired + hysteresis / 2);
-          const uint32_t maxTrim = framesPerPacket_ / 2; // Trim gently in small steps
+          const uint32_t maxTrim = std::max<uint32_t>(1, framesPerPacket_ / 8);
           const uint32_t trim = std::min(excess, maxTrim);
           ring_->Discard(static_cast<size_t>(trim) * capBytesPerFrame_);
+          if (diagnostics_ && trim)
+            diagnostics_->driftTrimFrames.fetch_add(trim, std::memory_order_relaxed);
         }
         minAvail_ = 0xFFFFFFFFu;
       }
@@ -476,27 +554,34 @@ void WasapiPassthrough::ThreadProc()
 
     BYTE* out = nullptr;
     HRESULT hr = render_->GetBuffer(bufferFrames_, &out);
-    if (FAILED(hr))
+    if (FAILED(hr) || !out)
     {
+      failed_.store(true, std::memory_order_relaxed);
+      if (diagnostics_) diagnostics_->outputWasapiErrors.fetch_add(1, std::memory_order_relaxed);
       std::fprintf(stderr, "[WasapiPassthrough] GetBuffer failed: %s\n", HrStr(hr).c_str());
       break;
     }
     const bool hadAudio = EncodeIntoBuffer(out);
-    render_->ReleaseBuffer(bufferFrames_, 0);
+    hr = render_->ReleaseBuffer(bufferFrames_, 0);
+    if (FAILED(hr))
+    {
+      failed_.store(true, std::memory_order_relaxed);
+      if (diagnostics_) diagnostics_->outputWasapiErrors.fetch_add(1, std::memory_order_relaxed);
+      std::fprintf(stderr, "[WasapiPassthrough] ReleaseBuffer failed: %s\n", HrStr(hr).c_str());
+      break;
+    }
 
     if (sharedMem_.IsOpen())
     {
       MeterSharedState* ms = sharedMem_.Get();
       if (ms)
       {
-        if (hadAudio)
-        {
-          enc_.GetChannelLevels(ms->peakLevels, ms->rmsLevels);
-        }
+        if (hadAudio) enc_.GetChannelLevels(ms->peakLevels, ms->rmsLevels);
         ms->active = 1;
         ms->frameCounter++;
       }
     }
+    PublishDiagnostics();
   }
 
   if (mmcss) AvRevertMmThreadCharacteristics(mmcss);
