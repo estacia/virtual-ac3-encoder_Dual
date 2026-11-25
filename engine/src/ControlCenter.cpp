@@ -453,11 +453,15 @@ void LoadConfiguration() {
 
     const auto& inDevs = g_loopback ? g_renderDevices : g_captureDevices;
     g_selectedInDevice = FindDeviceById(inDevs, cfg["in_id"]);
+    if (g_selectedInDevice < 0 && !cfg["in"].empty())
+        g_selectedInDevice = FindDeviceBySubstring(inDevs, cfg["in"]);
     if (g_selectedInDevice < 0)
         g_selectedInDevice = FindDeviceBySubstring(inDevs, g_loopback ? "CABLE Input" : "CABLE Output");
     if (g_selectedInDevice < 0 && !inDevs.empty()) g_selectedInDevice = 0;
 
     g_selectedOutDevice = FindDeviceById(g_renderDevices, cfg["out_id"]);
+    if (g_selectedOutDevice < 0 && !cfg["out"].empty())
+        g_selectedOutDevice = FindDeviceBySubstring(g_renderDevices, cfg["out"]);
     if (g_selectedOutDevice < 0)
         g_selectedOutDevice = FindDeviceBySubstring(g_renderDevices, "Realtek Digital");
     if (g_selectedOutDevice < 0 && !g_renderDevices.empty()) g_selectedOutDevice = 0;
