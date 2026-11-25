@@ -31,6 +31,24 @@ jobs:
       - name: Add MSBuild to PATH
         uses: microsoft/setup-msbuild@v2
 
+      - name: Install Windows SDK and WDK tools
+        shell: pwsh
+        timeout-minutes: 25
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $stampInf = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter 'stampinf.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $stampInf) {
+            winget install --id Microsoft.WindowsSDK.10.0.28000 --exact --source winget --silent --accept-source-agreements --accept-package-agreements
+            if ($LASTEXITCODE -ne 0) { throw "Windows SDK installation failed ($LASTEXITCODE)" }
+
+            winget install --id Microsoft.WindowsWDK.10.0.28000 --exact --source winget --silent --accept-source-agreements --accept-package-agreements
+            if ($LASTEXITCODE -ne 0) { throw "Windows WDK installation failed ($LASTEXITCODE)" }
+          }
+
+          $stampInf = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter 'stampinf.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $stampInf) { throw 'WDK installation completed but stampinf.exe is still missing.' }
+          Write-Host "WDK tool found: $($stampInf.FullName)"
+
       - name: Build Release x64
         shell: pwsh
         run: |
