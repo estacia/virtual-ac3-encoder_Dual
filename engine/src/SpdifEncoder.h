@@ -34,6 +34,19 @@ class SpdifEncoder
 public:
   enum class Codec { AC3, DTS };
 
+  // State reported by the live stream diagnostics panel.
+  enum class FilterStatus : uint32_t
+  {
+    Disabled = 0,
+    StereoUpmix = 1,
+    DynamicStereo = 2,
+    Warming = 3,
+    NativeBypass = 4,
+    HoldPrewarm = 5,
+  };
+
+  static constexpr int kSurroundFilterHopFrames = 2048;
+
   SpdifEncoder();
   ~SpdifEncoder();
   SpdifEncoder(const SpdifEncoder&) = delete;
@@ -87,6 +100,12 @@ public:
   // Channels expected in the interleaved input (== inLayout.nb_channels).
   int InChannels() const { return inLayout_.nb_channels; }
 
+  FilterStatus GetFilterStatus() const;
+  uint32_t FilterFifoFrames() const;
+  uint32_t FilterFifoTargetFrames() const;
+  uint32_t FilterHopFrames() const;
+  uint64_t FilterProcessedFrames() const { return filterInputFramesProcessed_; }
+
   // An IEC 61937 AC3 burst is 6144 bytes; DTS burst is 2048 bytes.
   static constexpr int kMaxBytesPerPacket = 6144;
 
@@ -109,7 +128,7 @@ private:
   void ComputeLevels();
 
   // Dynamic upmix helpers: detect stereo content in a multichannel stream and extract FL+FR.
-  bool IsEffectivelyStereo(const uint8_t* in) const;
+  bool IsEffectivelyStereo(const uint8_t* in, bool* hasDiscreteActivity = nullptr) const;
   void ExtractStereo(const uint8_t* in, uint8_t* out) const;
 
   mutable std::array<std::atomic<float>, 6> peakLevels_{};
@@ -139,6 +158,12 @@ private:
   bool             dynamicUpmix_ = false;
   bool             alwaysUpmix_ = false;
   bool             dualStereo_ = false; // direct L/R copy to rear channels for stereo sources
+  bool             dynamicFilterBypassed_ = false;
+  bool             dynamicFilterNeedsWarmup_ = false;
+  bool             dynamicFilterPrimed_ = false;
+  bool             dynamicFilterActive_ = false;
+  int              dynamicFilterWarmupFrames_ = 0;
+  uint64_t         filterInputFramesProcessed_ = 0;
   Upmix            upmixMode_ = Upmix::Off;
   mutable bool     effectivelyStereo_ = true;
   mutable int      multichannelHoldFrames_ = 0; // hysteresis hold for native 5.1 streams
