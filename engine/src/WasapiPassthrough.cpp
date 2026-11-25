@@ -443,6 +443,10 @@ void WasapiPassthrough::Stop()
     if (ms)
     {
       ms->active = 0;
+      InterlockedExchange(&ms->surroundFilterState, 0);
+      InterlockedExchange(&ms->surroundFilterHopFrames, 0);
+      InterlockedExchange64(&ms->surroundFilterFifoFrames, 0);
+      InterlockedExchange(&ms->surroundFilterTargetFrames, 0);
       for (int i = 0; i < 6; ++i) { ms->peakLevels[i] = 0.0f; ms->rmsLevels[i] = 0.0f; }
     }
   }
@@ -461,8 +465,18 @@ void WasapiPassthrough::Stop()
 void WasapiPassthrough::PublishDiagnostics()
 {
   if (!sharedMem_.IsOpen() || !diagnostics_) return;
-  PublishAudioDiagnostics(sharedMem_.Get(), diagnostics_, ring_ ? ring_->BytesAvailable() : 0,
+  MeterSharedState* state = sharedMem_.Get();
+  PublishAudioDiagnostics(state, diagnostics_, ring_ ? ring_->BytesAvailable() : 0,
                           ring_ ? ring_->Capacity() : 0, capBytesPerFrame_);
+  if (!state) return;
+  InterlockedExchange(&state->surroundFilterState,
+      static_cast<LONG>(enc_.GetFilterStatus()));
+  InterlockedExchange(&state->surroundFilterHopFrames,
+      static_cast<LONG>(enc_.FilterHopFrames()));
+  InterlockedExchange64(&state->surroundFilterFifoFrames,
+      static_cast<LONG64>(enc_.FilterFifoFrames()));
+  InterlockedExchange(&state->surroundFilterTargetFrames,
+      static_cast<LONG>(enc_.FilterFifoTargetFrames()));
 }
 
 void WasapiPassthrough::ThreadProc()
