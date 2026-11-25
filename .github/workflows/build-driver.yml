@@ -1,0 +1,76 @@
+name: Driver Build
+
+on:
+  push:
+    branches:
+      - main
+      - feature/dual-stereo-copy
+    paths:
+      - 'driver/**'
+      - '.github/workflows/build-driver.yml'
+  pull_request:
+    branches:
+      - main
+    types: [opened, synchronize, reopened]
+    paths:
+      - 'driver/**'
+      - '.github/workflows/build-driver.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-driver:
+    name: Build SimpleAudioSample WDK driver (x64)
+    runs-on: windows-2025-vs2026
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build Release x64
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          msbuild .\driver\SimpleAudioSample.sln /m /p:Configuration=Release /p:Platform=x64 /v:minimal
+          if ($LASTEXITCODE -ne 0) { throw "MSBuild failed with exit code $LASTEXITCODE" }
+
+      - name: Collect driver package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = (Resolve-Path .\driver).Path
+          $stage = Join-Path $env:GITHUB_WORKSPACE 'driver-artifacts'
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+
+          $sysFiles = @(Get-ChildItem $root -Recurse -File -Filter '*.sys')
+          $catFiles = @(Get-ChildItem $root -Recurse -File -Filter '*.cat')
+          $infFiles = @(Get-ChildItem $root -Recurse -File -Filter '*.inf')
+
+          if ($sysFiles.Count -eq 0) { throw 'No .sys driver binary was produced.' }
+          if ($catFiles.Count -eq 0) { throw 'No .cat driver catalog was produced.' }
+          if ($infFiles.Count -eq 0) { throw 'No .inf installation file was found.' }
+
+          $files = @(Get-ChildItem $root -Recurse -File | Where-Object {
+            $_.Extension -in '.sys', '.cat', '.inf', '.cer', '.pfx', '.pdb'
+          })
+          foreach ($file in $files) {
+            $relative = $file.FullName.Substring($root.Length).TrimStart('\','/')
+            $destination = Join-Path $stage $relative
+            New-Item -ItemType Directory -Force -Path (Split-Path $destination) | Out-Null
+            Copy-Item $file.FullName $destination -Force
+          }
+
+          Write-Host "SYS: $($sysFiles.Count), CAT: $($catFiles.Count), INF: $($infFiles.Count)"
+          Get-ChildItem $stage -Recurse -File | Select-Object FullName, Length | Format-Table -AutoSize
+
+      - name: Upload driver package
+        uses: actions/upload-artifact@v4
+        with:
+          name: SimpleAudioSample-driver-x64-Release
+          path: driver-artifacts/
+          if-no-files-found: error
+          retention-days: 14
