@@ -220,11 +220,26 @@ bool SpdifEncoder::Init(const Params& p)
   }
   if (!useFilter_)
   {
-    rc = swr_alloc_set_opts2(&swr_, &codecCtx_->ch_layout, AV_SAMPLE_FMT_FLTP, sampleRate_,
-                             &inLayout_, inSampleFmt_, sampleRate_, 0, nullptr);
-    if (rc < 0 || !swr_) { LogAv("swr_alloc_set_opts2", rc); return false; }
-    rc = swr_init(swr_);
-    if (rc < 0) { LogAv("swr_init", rc); return false; }
+    // For ordinary 2-channel Dual Stereo input, convert only FL/FR to planar float.
+    // The unused Center/LFE planes are zeroed and the rear planes are copied directly,
+    // avoiding an unnecessary six-channel swresample matrix on every packet.
+    if (dualStereo_ && inLayout_.nb_channels == 2)
+    {
+      AVChannelLayout stereo = AV_CHANNEL_LAYOUT_STEREO;
+      rc = swr_alloc_set_opts2(&dualStereoSwr_, &stereo, AV_SAMPLE_FMT_FLTP, sampleRate_,
+                               &inLayout_, inSampleFmt_, sampleRate_, 0, nullptr);
+      if (rc < 0 || !dualStereoSwr_) { LogAv("swr_alloc_set_opts2(DualStereo)", rc); return false; }
+      rc = swr_init(dualStereoSwr_);
+      if (rc < 0) { LogAv("swr_init(DualStereo)", rc); return false; }
+    }
+    else
+    {
+      rc = swr_alloc_set_opts2(&swr_, &codecCtx_->ch_layout, AV_SAMPLE_FMT_FLTP, sampleRate_,
+                               &inLayout_, inSampleFmt_, sampleRate_, 0, nullptr);
+      if (rc < 0 || !swr_) { LogAv("swr_alloc_set_opts2", rc); return false; }
+      rc = swr_init(swr_);
+      if (rc < 0) { LogAv("swr_init", rc); return false; }
+    }
   }
 
   pkt_ = av_packet_alloc();
@@ -282,6 +297,7 @@ void SpdifEncoder::Close()
   av_channel_layout_uninit(&filterInLayout_);
   stereoExtract_.clear();
   if (dtsS32Swr_) swr_free(&dtsS32Swr_);
+  if (dualStereoSwr_) swr_free(&dualStereoSwr_);
   if (swr_)       swr_free(&swr_);
   if (dtsFrame_)  av_frame_free(&dtsFrame_);
   if (frame_)     av_frame_free(&frame_);
@@ -474,6 +490,39 @@ int SpdifEncoder::EncodePacket(const uint8_t* in, uint8_t* outBuf, int outSize)
       if (got < 0) { LogAv("swr_convert", got); return -1; }
     }
   }
+  else if (dualStereoSwr_)
+  {
+    if (av_frame_make_writable(frame_) < 0)
+      return -1;
+    const uint8_t* inPlanes[1] = { in };
+    uint8_t* stereoPlanes[2] = { frame_->extended_data[0], frame_->extended_data[1] };
+    const int got = swr_convert(dualStereoSwr_, stereoPlanes, frame_->nb_samples,
+                                inPlanes, framesPerPacket_);
+    if (got < 0) { LogAv("swr_convert(DualStereo)", got); return -1; }
+
+    float* fl  = reinterpret_cast<float*>(frame_->extended_data[0]);
+    float* fr  = reinterpret_cast<float*>(frame_->extended_data[1]);
+    float* fc  = reinterpret_cast<float*>(frame_->extended_data[2]);
+    float* lfe = reinterpret_cast<float*>(frame_->extended_data[3]);
+    float* sl  = reinterpret_cast<float*>(frame_->extended_data[4]);
+    float* sr  = reinterpret_cast<float*>(frame_->extended_data[5]);
+    if (!fl || !fr || !fc || !lfe || !sl || !sr)
+      return -1;
+
+    const size_t convertedBytes = static_cast<size_t>(got) * sizeof(float);
+    std::memcpy(sl, fl, convertedBytes);
+    std::memcpy(sr, fr, convertedBytes);
+    if (got < frame_->nb_samples)
+    {
+      const size_t tailBytes = static_cast<size_t>(frame_->nb_samples - got) * sizeof(float);
+      std::memset(fl + got, 0, tailBytes);
+      std::memset(fr + got, 0, tailBytes);
+      std::memset(sl + got, 0, tailBytes);
+      std::memset(sr + got, 0, tailBytes);
+    }
+    std::memset(fc, 0, static_cast<size_t>(frame_->nb_samples) * sizeof(float));
+    std::memset(lfe, 0, static_cast<size_t>(frame_->nb_samples) * sizeof(float));
+  }
   else
   {
     if (av_frame_make_writable(frame_) < 0)
@@ -482,13 +531,9 @@ int SpdifEncoder::EncodePacket(const uint8_t* in, uint8_t* outBuf, int outSize)
     int got = swr_convert(swr_, frame_->data, frame_->nb_samples, inPlanes, framesPerPacket_);
     if (got < 0) { LogAv("swr_convert", got); return -1; }
 
-    // Dual Stereo Copy: for ordinary stereo input, duplicate the exact front
-    // channels to the matching rear channels. No matrix steering, FFT filter,
-    // delay line, or additional FIFO is involved. For a multichannel endpoint
-    // carrying stereo-padded audio (e.g. a 5.1-configured virtual device), use
-    // the existing discrete-channel detector; genuine 5.1 content is untouched.
-    const bool stereoSource =
-        dualStereo_ && (inLayout_.nb_channels <= 2 || IsEffectivelyStereo(in));
+    // Stereo-padded multichannel sources still require the discrete-channel
+    // detector; real native 5.1 content remains untouched.
+    const bool stereoSource = dualStereo_ && IsEffectivelyStereo(in);
     if (stereoSource && codecCtx_->ch_layout.nb_channels >= 6)
     {
       float* fl  = reinterpret_cast<float*>(frame_->extended_data[0]);
@@ -499,10 +544,11 @@ int SpdifEncoder::EncodePacket(const uint8_t* in, uint8_t* outBuf, int outSize)
       float* sr  = reinterpret_cast<float*>(frame_->extended_data[5]);
       if (fl && fr && fc && lfe && sl && sr)
       {
-        std::copy_n(fl, frame_->nb_samples, sl);
-        std::copy_n(fr, frame_->nb_samples, sr);
-        std::fill_n(fc, frame_->nb_samples, 0.0f);
-        std::fill_n(lfe, frame_->nb_samples, 0.0f);
+        const size_t bytes = static_cast<size_t>(frame_->nb_samples) * sizeof(float);
+        std::memcpy(sl, fl, bytes);
+        std::memcpy(sr, fr, bytes);
+        std::memset(fc, 0, bytes);
+        std::memset(lfe, 0, bytes);
       }
     }
   }
