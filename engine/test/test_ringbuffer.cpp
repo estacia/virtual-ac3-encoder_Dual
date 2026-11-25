@@ -140,3 +140,43 @@ TEST_CASE("SPSC concurrent transfer preserves every byte in order")
   CHECK(seqOk);
   CHECK(writeSum == readSum);
 }
+
+TEST_CASE("PCM ring buffer never splits interleaved frames")
+{
+  constexpr size_t kFrameBytes = 24; // 5.1 float32
+  RingBuffer rb(1000, kFrameBytes);
+  CHECK(rb.Capacity() % kFrameBytes == 0);
+  CHECK(rb.BytesPerFrame() == kFrameBytes);
+
+  std::vector<uint8_t> input(5 * kFrameBytes + 7, 0x5A);
+  const size_t written = rb.Write(input.data(), input.size());
+  CHECK(written % kFrameBytes == 0);
+  CHECK(written == 5 * kFrameBytes);
+  CHECK(rb.BytesAvailable() == 5 * kFrameBytes);
+
+  rb.Discard(kFrameBytes - 1);
+  CHECK(rb.BytesAvailable() == 5 * kFrameBytes); // partial-frame discard is ignored
+  rb.Discard(kFrameBytes + 3);
+  CHECK(rb.BytesAvailable() == 4 * kFrameBytes); // only one full frame discarded
+
+  std::vector<uint8_t> output(4 * kFrameBytes);
+  CHECK(rb.Read(output.data(), output.size()) == output.size());
+  CHECK(output[0] == 0x5A);
+  CHECK(rb.BytesAvailable() == 0);
+}
+
+TEST_CASE("frame-aligned ring buffer wraps on frame boundaries")
+{
+  constexpr size_t kFrameBytes = 6; // S16 5.1
+  RingBuffer rb(4 * kFrameBytes, kFrameBytes);
+  std::vector<uint8_t> a(4 * kFrameBytes, 0x11);
+  std::vector<uint8_t> b(3 * kFrameBytes, 0x22);
+  std::vector<uint8_t> out(3 * kFrameBytes);
+
+  CHECK(rb.Write(a.data(), a.size()) == a.size());
+  CHECK(rb.Read(out.data(), out.size()) == out.size());
+  CHECK(rb.Write(b.data(), b.size()) == b.size());
+  CHECK(rb.Read(out.data(), out.size()) == out.size());
+  CHECK(out.front() == 0x22);
+  CHECK(out.back() == 0x22);
+}
