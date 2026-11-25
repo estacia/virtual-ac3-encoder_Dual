@@ -253,7 +253,7 @@ static int RunMonitor(const Config& c, IMMDevice* inDev)
   if (!cap.Init(inDev, c.loopback)) return 1;
   const CaptureFormat& f = cap.Format();
   const size_t bpf = f.bytesPerFrame() ? f.bytesPerFrame() : 1;
-  RingBuffer ring(static_cast<size_t>(32) * 1536 * bpf);
+  RingBuffer ring(static_cast<size_t>(32) * 1536 * bpf, bpf);
   cap.SetRing(&ring);
   if (!cap.Start()) return 1;
 
