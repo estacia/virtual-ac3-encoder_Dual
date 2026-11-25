@@ -1030,6 +1030,41 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int) {
         DrawSpeakerVUMeters(isRunning);
 
         ImGui::Spacing();
+        if (ImGui::CollapsingHeader("STREAM DIAGNOSTICS")) {
+            const MeterSharedState* state = g_meterMem.IsOpen() ? g_meterMem.Get() : nullptr;
+            if (state && state->version >= 2) {
+                const auto readCounter = [](const volatile LONG64* value) {
+                    return static_cast<unsigned long long>(
+                        InterlockedCompareExchange64(const_cast<volatile LONG64*>(value), 0, 0));
+                };
+                const unsigned long long dropped = readCounter(&state->captureDroppedFrames);
+                const unsigned long long underrunFrames = readCounter(&state->outputUnderrunFrames);
+                const unsigned long long underrunPackets = readCounter(&state->outputUnderrunPackets);
+                const unsigned long long wasapiErrors = readCounter(&state->wasapiErrorCount);
+                const unsigned long long eventTimeouts = readCounter(&state->eventTimeoutCount);
+                const unsigned long long driftTrim = readCounter(&state->driftTrimFrames);
+                const unsigned long long ringFill = readCounter(&state->ringFillFrames);
+                const unsigned long long ringPeak = readCounter(&state->ringPeakFrames);
+                const unsigned int ringCapacity = static_cast<unsigned int>(
+                    InterlockedCompareExchange(const_cast<volatile LONG*>(&state->ringCapacityFrames), 0, 0));
+                const double rate = state->sampleRate ? static_cast<double>(state->sampleRate) : 48000.0;
+                ImGui::Text("Capture dropped: %llu frames (%.2f ms)",
+                    dropped, 1000.0 * static_cast<double>(dropped) / rate);
+                ImGui::Text("Output underruns: %llu frames / %llu packets (%.2f ms)",
+                    underrunFrames, underrunPackets,
+                    1000.0 * static_cast<double>(underrunFrames) / rate);
+                ImGui::Text("WASAPI errors: %llu | Render event timeouts: %llu",
+                    wasapiErrors, eventTimeouts);
+                ImGui::Text("Drift correction: %llu frames (%.2f ms)",
+                    driftTrim, 1000.0 * static_cast<double>(driftTrim) / rate);
+                ImGui::Text("Ring fill: %llu / %u frames | peak: %llu frames",
+                    ringFill, ringCapacity, ringPeak);
+            } else {
+                ImGui::TextDisabled("Waiting for engine telemetry (restart the audio engine if needed).");
+            }
+        }
+
+        ImGui::Spacing();
         ImGui::Separator();
         ImGui::Spacing();
 
@@ -1043,7 +1078,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int) {
                 TriggerApplySettings();
             }
             ImGui::SameLine();
-            ImGui::TextDisabled(g_loopback ? "(Captures Playback device, e.g. CABLE Input)" : "(Captures Recording endpoint, e.g. Mics / CABLE Output)");
+            ImGui::TextDisabled(g_loopback ? "(Loopback path; compare with direct capture for latency)" : "(Direct capture; requests 5 ms IAudioClient3 when supported)");
 
             const auto& inDevs = g_loopback ? g_renderDevices : g_captureDevices;
 
