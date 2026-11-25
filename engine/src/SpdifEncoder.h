@@ -154,7 +154,8 @@ private:
 
   // Dynamic upmix: input is multichannel (e.g. 5.1 cable) but we detect at runtime
   // whether the content is actually stereo (non-FL/FR channels silent) and upmix it.
-  // Both the filter graph (stereo input) and swr (multichannel passthrough) stay live.
+  // The FFT graph handles front-only content; it is bypassed while discrete 5.1
+  // channels are active and pre-warmed during the existing native-layout hold.
   bool             dynamicUpmix_ = false;
   bool             alwaysUpmix_ = false;
   bool             dualStereo_ = false; // direct L/R copy to rear channels for stereo sources
