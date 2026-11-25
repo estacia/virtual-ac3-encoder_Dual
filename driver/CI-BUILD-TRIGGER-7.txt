@@ -1,0 +1,1 @@
+Temporary WDK validation trigger for absolute NuGet content root; do not merge.
