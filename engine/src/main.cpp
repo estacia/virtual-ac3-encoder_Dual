@@ -209,14 +209,19 @@ static bool ResolveCapture(const Config& c, ComPtr<IMMDevice>& dev, EndpointInfo
   const EDataFlow flow = c.loopback ? eRender : eCapture;
   if (!c.inId.empty())
   {
-    if (!DeviceEnum::GetById(c.inId, dev)) { std::fprintf(stderr, "input id not found\n"); return false; }
-    info.id = c.inId;
-    return true;
+    if (DeviceEnum::GetById(c.inId, dev))
+    {
+      info.id = c.inId;
+      return true;
+    }
+    std::fprintf(stderr, "[Engine] saved input endpoint ID is unavailable; trying its friendly name.\n");
   }
-  if (DeviceEnum::FindByNameSubstring(flow, c.inName, dev, info))
+  const std::wstring inputName = c.inName.empty()
+      ? (c.loopback ? L"CABLE Input" : L"CABLE Output") : c.inName;
+  if (DeviceEnum::FindByNameSubstring(flow, inputName, dev, info))
     return true;
   std::fprintf(stderr, "input device matching \"%s\" not found among %s endpoints (try --list)\n",
-               Narrow(c.inName.c_str()).c_str(), c.loopback ? "render" : "capture");
+               Narrow(inputName.c_str()).c_str(), c.loopback ? "render" : "capture");
   return false;
 }
 
@@ -224,15 +229,17 @@ static bool ResolveOutput(const Config& c, ComPtr<IMMDevice>& dev, EndpointInfo&
 {
   if (!c.outId.empty())
   {
-    if (!DeviceEnum::GetById(c.outId, dev)) { std::fprintf(stderr, "output id not found\n"); return false; }
-    info.id = c.outId;
-    return true;
+    if (DeviceEnum::GetById(c.outId, dev))
+    {
+      info.id = c.outId;
+      return true;
+    }
+    std::fprintf(stderr, "[Engine] saved output endpoint ID is unavailable; trying its friendly name.\n");
   }
   if (!c.outName.empty())
   {
     if (DeviceEnum::FindByNameSubstring(eRender, c.outName, dev, info)) return true;
     std::fprintf(stderr, "output device matching \"%s\" not found (try --list)\n", Narrow(c.outName.c_str()).c_str());
-    return false;
   }
   if (c.outAutoSpdif)
   {
