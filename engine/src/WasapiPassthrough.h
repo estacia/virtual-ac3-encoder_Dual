@@ -9,6 +9,7 @@
 #pragma once
 
 #include "ComUtil.h"
+#include "AudioDiagnostics.h"
 #include "MeterSharedState.h"
 #include "RingBuffer.h"
 #include "SpdifEncoder.h"
@@ -46,15 +47,18 @@ public:
   // dev    : optical output endpoint (must support AC3 passthrough in exclusive mode)
   // ring   : shared input ring (filled by WasapiCapture), holding capFmt frames
   // capFmt : capture format — defines the encoder's input (channels/layout/sample fmt/rate)
-  bool Init(IMMDevice* dev, RingBuffer* ring, const CaptureFormat& capFmt, const Params& p);
+  bool Init(IMMDevice* dev, RingBuffer* ring, const CaptureFormat& capFmt, const Params& p,
+            AudioDiagnostics* diagnostics = nullptr);
   bool Start();
   void Stop();
+  bool HasFailed() const { return failed_.load(std::memory_order_relaxed); }
   // Thread-safe live trim for the six AC3 output channels, in dB.
   void SetChannelGainsDb(const std::array<float, 6>& gainsDb) { enc_.SetChannelGainsDb(gainsDb); }
 
 private:
   bool InitExclusive(int rate);
   bool EncodeIntoBuffer(BYTE* out); // fills one full WASAPI buffer with bursts (+ stuffing); returns true if non-underrun
+  void PublishDiagnostics();
   void ThreadProc();
 
   ComPtr<IMMDevice>          dev_;
@@ -65,6 +69,7 @@ private:
   CaptureFormat  capFmt_;
   size_t         capBytesPerFrame_ = 0;
   Params         params_;
+  AudioDiagnostics* diagnostics_ = nullptr;
 
   SpdifEncoder   enc_;
   int            framesPerPacket_ = 1536;
@@ -79,6 +84,7 @@ private:
   HANDLE stopEvent_ = nullptr;
   std::thread thread_;
   std::atomic_bool running_{false};
+  std::atomic_bool failed_{false};
 
   // drift tracking (consumer thread only)
   uint32_t cycle_ = 0;
