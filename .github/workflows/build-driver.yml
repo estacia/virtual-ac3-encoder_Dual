@@ -40,10 +40,13 @@ jobs:
 
           $wdkRoot = Join-Path $env:USERPROFILE '.nuget\packages\microsoft.windows.wdk.x64\10.0.28000.2526\c'
           if (-not (Test-Path $wdkRoot)) { throw "WDK NuGet content folder not found: $wdkRoot" }
-          $stampInf = Get-ChildItem $wdkRoot -Recurse -File -Filter 'stampinf.exe' | Select-Object -First 1
-          if (-not $stampInf) { throw "stampinf.exe not found under WDK NuGet content folder: $wdkRoot" }
+          $stampInf = Join-Path $wdkRoot 'bin\10.0.28000.0\x64\stampinf.exe'
+          if (-not (Test-Path $stampInf)) {
+            Get-ChildItem $wdkRoot -Recurse -File -Filter 'stampinf.exe' | Select-Object -ExpandProperty FullName | Write-Host
+            throw "x64 stampinf.exe not found at expected path: $stampInf"
+          }
           Write-Host "WDK NuGet root: $wdkRoot"
-          Write-Host "stampinf.exe: $($stampInf.FullName)"
+          Write-Host "x64 stampinf.exe: $stampInf"
 
       - name: Build Release x64
         shell: pwsh
