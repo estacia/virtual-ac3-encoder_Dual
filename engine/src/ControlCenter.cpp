@@ -1038,7 +1038,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int) {
         ImGui::Spacing();
         if (ImGui::CollapsingHeader("STREAM DIAGNOSTICS")) {
             const MeterSharedState* state = g_meterMem.IsOpen() ? g_meterMem.Get() : nullptr;
-            if (state && state->version >= 2) {
+            if (state && state->version >= 3) {
                 const auto readCounter = [](const volatile LONG64* value) {
                     return static_cast<unsigned long long>(
                         InterlockedCompareExchange64(const_cast<volatile LONG64*>(value), 0, 0));
@@ -1065,6 +1065,31 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int) {
                     driftTrim, 1000.0 * static_cast<double>(driftTrim) / rate);
                 ImGui::Text("Ring fill: %llu / %u frames | peak: %llu frames",
                     ringFill, ringCapacity, ringPeak);
+
+                const LONG filterState = InterlockedCompareExchange(
+                    const_cast<volatile LONG*>(&state->surroundFilterState), 0, 0);
+                const LONG filterHop = InterlockedCompareExchange(
+                    const_cast<volatile LONG*>(&state->surroundFilterHopFrames), 0, 0);
+                const unsigned long long filterFifo = readCounter(&state->surroundFilterFifoFrames);
+                const LONG filterTarget = InterlockedCompareExchange(
+                    const_cast<volatile LONG*>(&state->surroundFilterTargetFrames), 0, 0);
+                const char* filterLabel = "Disabled";
+                switch (filterState) {
+                    case 1: filterLabel = "Stereo FFT upmix"; break;
+                    case 2: filterLabel = "Dynamic stereo FFT upmix"; break;
+                    case 3: filterLabel = "FFT warm-up"; break;
+                    case 4: filterLabel = "Native 5.1 - FFT bypassed"; break;
+                    case 5: filterLabel = "Native hold - FFT pre-warmed"; break;
+                    default: break;
+                }
+                ImGui::Text("Surround filter: %s", filterLabel);
+                if (filterHop > 0) {
+                    ImGui::Text("FFT hop: %ld frames (%.2f ms) | FIFO: %llu / %ld frames (%.2f / %.2f ms)",
+                        filterHop, 1000.0 * static_cast<double>(filterHop) / rate,
+                        filterFifo, filterTarget,
+                        1000.0 * static_cast<double>(filterFifo) / rate,
+                        1000.0 * static_cast<double>(filterTarget) / rate);
+                }
             } else {
                 ImGui::TextDisabled("Waiting for engine telemetry (restart the audio engine if needed).");
             }
