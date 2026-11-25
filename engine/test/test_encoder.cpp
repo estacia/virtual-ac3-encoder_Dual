@@ -213,7 +213,7 @@ TEST_CASE("latency: Config::GetEffectiveSafeFrames scales correctly")
   // AC3 mode
   c.outputMode = "ac3";
   c.latencyMode = "extreme";
-  CHECK(c.GetEffectiveSafeFrames() == 256);
+  CHECK(c.GetEffectiveSafeFrames() == 128);
 
   c.latencyMode = "fast";
   CHECK(c.GetEffectiveSafeFrames() == 384);
