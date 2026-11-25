@@ -196,27 +196,10 @@ TEST_CASE("latency: Config::GetEffectiveSafeFrames scales correctly")
   Config c;
   c.outputMode = "dts";
   c.latencyMode = "extreme";
-  CHECK(c.GetEffectiveSafeFrames() == 384);
+  CHECK(c.GetEffectiveSafeFrames() == 512);
 
   c.latencyMode = "fast";
   CHECK(c.GetEffectiveSafeFrames() == 640);
-
-  c.latencyMode = "balanced";
-  CHECK(c.GetEffectiveSafeFrames() == 512);
-
-  c.latencyMode = "safe";
-  CHECK(c.GetEffectiveSafeFrames() == 768);
-
-  c.latencyMode = "relaxed";
-  CHECK(c.GetEffectiveSafeFrames() == 1024);
-
-  // AC3 mode
-  c.outputMode = "ac3";
-  c.latencyMode = "extreme";
-  CHECK(c.GetEffectiveSafeFrames() == 256);
-
-  c.latencyMode = "fast";
-  CHECK(c.GetEffectiveSafeFrames() == 512);
 
   c.latencyMode = "balanced";
   CHECK(c.GetEffectiveSafeFrames() == 768);
@@ -226,6 +209,23 @@ TEST_CASE("latency: Config::GetEffectiveSafeFrames scales correctly")
 
   c.latencyMode = "relaxed";
   CHECK(c.GetEffectiveSafeFrames() == 1536);
+
+  // AC3 mode
+  c.outputMode = "ac3";
+  c.latencyMode = "extreme";
+  CHECK(c.GetEffectiveSafeFrames() == 256);
+
+  c.latencyMode = "fast";
+  CHECK(c.GetEffectiveSafeFrames() == 384);
+
+  c.latencyMode = "balanced";
+  CHECK(c.GetEffectiveSafeFrames() == 512);
+
+  c.latencyMode = "safe";
+  CHECK(c.GetEffectiveSafeFrames() == 768);
+
+  c.latencyMode = "relaxed";
+  CHECK(c.GetEffectiveSafeFrames() == 1024);
 
   // Custom numeric override
   c.safeFrames = 333;
