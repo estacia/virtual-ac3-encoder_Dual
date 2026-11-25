@@ -1,0 +1,46 @@
+name: One-time Release Cleanup
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/cleanup-releases-once.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    if: ${{ contains(github.event.head_commit.message, '[release-cleanup]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Rename v0.2.4 and delete every other release entry
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          releases="$(gh api "repos/${GH_REPO}/releases?per_page=100")"
+          keep_matches="$(jq -c '[.[] | select(.tag_name == "v0.2.4")]' <<< "$releases")"
+          keep_count="$(jq 'length' <<< "$keep_matches")"
+
+          if [[ "$keep_count" -ne 1 ]]; then
+            echo "Expected exactly one v0.2.4 release; found $keep_count. No releases were deleted."
+            exit 1
+          fi
+
+          keep_id="$(jq -r '.[0].id' <<< "$keep_matches")"
+          echo "Renaming Release v0.2.4 (ID $keep_id) to 0.2.4-stable"
+          gh api -X PATCH "repos/${GH_REPO}/releases/$keep_id" -f name='0.2.4-stable' >/dev/null
+
+          while IFS= read -r release_id; do
+            [[ -z "$release_id" ]] && continue
+            echo "Deleting Release entry ID $release_id (leaving its Git tag intact)"
+            gh api -X DELETE "repos/${GH_REPO}/releases/$release_id" >/dev/null
+          done < <(jq -r --argjson keep_id "$keep_id" '.[] | select(.id != $keep_id) | .id' <<< "$releases")
+
+          final_releases="$(gh api "repos/${GH_REPO}/releases?per_page=100")"
+          jq -e 'length == 1 and .[0].tag_name == "v0.2.4" and .[0].name == "0.2.4-stable"' <<< "$final_releases" >/dev/null
+          echo "Verified: only the 0.2.4-stable Release remains. Git tags were not deleted."
