@@ -12,14 +12,14 @@ Requirements
        https://vb-audio.com/Cable/
    After installing, open Windows Sound settings:
      - Set "CABLE Input (VB-Audio Virtual Cable)" as your DEFAULT playback device.
-     - Dolby Control Center captures the paired "CABLE Output" recording endpoint by default.
-       This direct-capture path requests a 5 ms IAudioClient3 shared-mode period when supported
-       (10 ms in Safe/Relaxed presets), reducing capture-side buffering.
+     - Dolby Control Center uses WASAPI Loopback by default to capture the CABLE Input
+       playback endpoint. Keep Loopback enabled when using the included render-only WaveRT
+       Virtual 5.1 driver; that driver has no recording endpoint.
+     - For a real recording endpoint such as VB-CABLE "CABLE Output", you may disable
+       Loopback in the Control Center. Direct capture then requests a 5 ms IAudioClient3
+       shared-mode period when supported (10 ms in Safe/Relaxed presets).
      - (Optional) Configure Speakers > 5.1 Surround, or leave as Stereo and use Dynamic
        Surround 5.1 / Front Stage 3.1 upmixing in the Control Center.
-     - Enable "WASAPI Loopback Capture" only when you specifically need to capture a render
-       endpoint directly; loopback uses the Windows audio-engine period rather than a custom
-       IAudioClient3 period.
 
 2. An optical (S-PDIF / Toslink) output connected to your receiver's optical input.
 
