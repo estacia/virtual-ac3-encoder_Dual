@@ -1,17 +1,11 @@
 // RingBuffer.h
 //
-// Single-producer / single-consumer lock-free byte ring buffer.
-//
-// This is the Windows stand-in for SoundPusher's TPCircularBuffer: it decouples the
-// capture clock (producer) from the output/render clock (consumer) and absorbs the drift
-// between them. Unlike TPCircularBuffer it does not double-map memory; the consumer reads
-// into its own contiguous staging buffer (one memcpy per AC3 packet — negligible), which
-// keeps it fully portable.
-//
-// Safe for exactly one producer thread and one consumer thread. Capacity is rounded up to
-// a power of two so index wrapping is a mask.
+// Single-producer / single-consumer lock-free PCM ring buffer.
+// Internally, head/tail are counted in complete audio frames, never bytes.
+// This prevents an overflow or trim from splitting an interleaved PCM frame.
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <cstring>
@@ -20,77 +14,100 @@
 class RingBuffer
 {
 public:
-  explicit RingBuffer(size_t capacityBytes)
+  explicit RingBuffer(size_t capacityBytes, size_t bytesPerFrame = 1)
+      : frameBytes_(bytesPerFrame ? bytesPerFrame : 1)
   {
-    size_t cap = 1;
-    while (cap < capacityBytes)
-      cap <<= 1;
-    buf_.resize(cap);
-    mask_ = cap - 1;
+    const size_t requestedFrames =
+        std::max<size_t>(1, (capacityBytes + frameBytes_ - 1) / frameBytes_);
+    size_t frames = 1;
+    while (frames < requestedFrames && frames <= (static_cast<size_t>(-1) >> 1))
+      frames <<= 1;
+    capacityFrames_ = frames;
+    maskFrames_ = capacityFrames_ - 1;
+    buf_.resize(capacityFrames_ * frameBytes_);
   }
 
   size_t Capacity() const { return buf_.size(); }
+  size_t BytesPerFrame() const { return frameBytes_; }
 
-  // Consumer view: bytes ready to read.
+  // Consumer view: bytes ready to read (always a whole-frame multiple).
   size_t BytesAvailable() const
   {
     const uint64_t head = head_.load(std::memory_order_acquire);
     const uint64_t tail = tail_.load(std::memory_order_relaxed);
-    return static_cast<size_t>(head - tail);
+    return static_cast<size_t>(head - tail) * frameBytes_;
   }
 
-  // Producer view: free space.
+  // Producer view: free bytes (always a whole-frame multiple).
   size_t SpaceAvailable() const
-  {
-    return Capacity() - BytesAvailableProducer();
-  }
-
-  // Producer: append up to n bytes. Returns bytes actually written (may be < n if full).
-  size_t Write(const void* src, size_t n)
   {
     const uint64_t head = head_.load(std::memory_order_relaxed);
     const uint64_t tail = tail_.load(std::memory_order_acquire);
-    const size_t free = Capacity() - static_cast<size_t>(head - tail);
-    if (n > free)
-      n = free;
-
-    const size_t off = static_cast<size_t>(head) & mask_;
-    const size_t first = std::min(n, Capacity() - off);
-    std::memcpy(buf_.data() + off, src, first);
-    if (n > first)
-      std::memcpy(buf_.data(), static_cast<const uint8_t*>(src) + first, n - first);
-
-    head_.store(head + n, std::memory_order_release);
-    return n;
+    return (capacityFrames_ - static_cast<size_t>(head - tail)) * frameBytes_;
   }
 
-  // Consumer: copy up to n bytes WITHOUT consuming. Returns bytes copied.
+  // Producer: append complete frames only. A trailing partial frame is ignored.
+  // Returns bytes actually written; a short write is frame-aligned.
+  size_t Write(const void* src, size_t n)
+  {
+    if (!src || frameBytes_ == 0) return 0;
+    const size_t requestedFrames = n / frameBytes_;
+    if (requestedFrames == 0) return 0;
+
+    const uint64_t head = head_.load(std::memory_order_relaxed);
+    const uint64_t tail = tail_.load(std::memory_order_acquire);
+    const size_t usedFrames = static_cast<size_t>(head - tail);
+    const size_t freeFrames = capacityFrames_ - std::min(usedFrames, capacityFrames_);
+    const size_t frames = std::min(requestedFrames, freeFrames);
+    if (frames == 0) return 0;
+
+    const size_t offsetFrames = static_cast<size_t>(head) & maskFrames_;
+    const size_t firstFrames = std::min(frames, capacityFrames_ - offsetFrames);
+    const size_t firstBytes = firstFrames * frameBytes_;
+    const size_t totalBytes = frames * frameBytes_;
+    std::memcpy(buf_.data() + offsetFrames * frameBytes_, src, firstBytes);
+    if (totalBytes > firstBytes)
+      std::memcpy(buf_.data(), static_cast<const uint8_t*>(src) + firstBytes,
+                  totalBytes - firstBytes);
+
+    head_.store(head + frames, std::memory_order_release);
+    return totalBytes;
+  }
+
+  // Consumer view: copy complete frames without consuming.
   size_t Peek(void* dst, size_t n) const
   {
+    if (!dst || frameBytes_ == 0) return 0;
+    const size_t requestedFrames = n / frameBytes_;
+    if (requestedFrames == 0) return 0;
+
     const uint64_t head = head_.load(std::memory_order_acquire);
     const uint64_t tail = tail_.load(std::memory_order_relaxed);
-    const size_t avail = static_cast<size_t>(head - tail);
-    if (n > avail)
-      n = avail;
+    const size_t frames = std::min(requestedFrames, static_cast<size_t>(head - tail));
+    if (frames == 0) return 0;
 
-    const size_t off = static_cast<size_t>(tail) & mask_;
-    const size_t first = std::min(n, Capacity() - off);
-    std::memcpy(dst, buf_.data() + off, first);
-    if (n > first)
-      std::memcpy(static_cast<uint8_t*>(dst) + first, buf_.data(), n - first);
-    return n;
+    const size_t offsetFrames = static_cast<size_t>(tail) & maskFrames_;
+    const size_t firstFrames = std::min(frames, capacityFrames_ - offsetFrames);
+    const size_t firstBytes = firstFrames * frameBytes_;
+    const size_t totalBytes = frames * frameBytes_;
+    std::memcpy(dst, buf_.data() + offsetFrames * frameBytes_, firstBytes);
+    if (totalBytes > firstBytes)
+      std::memcpy(static_cast<uint8_t*>(dst) + firstBytes, buf_.data(),
+                  totalBytes - firstBytes);
+    return totalBytes;
   }
 
-  // Consumer: advance the read pointer by n bytes (clamped to what's available).
+  // Consumer: advance by complete frames only.
   void Discard(size_t n)
   {
-    const size_t avail = BytesAvailable();
-    if (n > avail)
-      n = avail;
-    tail_.store(tail_.load(std::memory_order_relaxed) + n, std::memory_order_release);
+    const size_t requestedFrames = n / frameBytes_;
+    const uint64_t head = head_.load(std::memory_order_acquire);
+    const uint64_t tail = tail_.load(std::memory_order_relaxed);
+    const size_t frames = std::min(requestedFrames, static_cast<size_t>(head - tail));
+    if (frames)
+      tail_.store(tail + frames, std::memory_order_release);
   }
 
-  // Consumer: Peek + Discard.
   size_t Read(void* dst, size_t n)
   {
     const size_t got = Peek(dst, n);
@@ -105,16 +122,10 @@ public:
   }
 
 private:
-  // Producer's own view of fill level (uses relaxed head since producer owns it).
-  size_t BytesAvailableProducer() const
-  {
-    const uint64_t head = head_.load(std::memory_order_relaxed);
-    const uint64_t tail = tail_.load(std::memory_order_acquire);
-    return static_cast<size_t>(head - tail);
-  }
-
   std::vector<uint8_t> buf_;
-  size_t mask_ = 0;
-  std::atomic<uint64_t> head_{0}; // total bytes written (producer)
-  std::atomic<uint64_t> tail_{0}; // total bytes read (consumer)
+  size_t frameBytes_ = 1;
+  size_t capacityFrames_ = 1;
+  size_t maskFrames_ = 0;
+  std::atomic<uint64_t> head_{0}; // complete frames written (producer)
+  std::atomic<uint64_t> tail_{0}; // complete frames read (consumer)
 };
