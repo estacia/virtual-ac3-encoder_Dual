@@ -16,11 +16,14 @@ WasapiCapture::~WasapiCapture()
   if (stopEvent_) CloseHandle(stopEvent_);
 }
 
-bool WasapiCapture::Init(IMMDevice* dev, bool loopback, REFERENCE_TIME preferredPeriodHns)
+bool WasapiCapture::Init(IMMDevice* dev, bool loopback, REFERENCE_TIME preferredPeriodHns,
+                          AudioDiagnostics* diagnostics)
 {
   if (!dev)
     return false;
 
+  diagnostics_ = diagnostics;
+  failed_.store(false, std::memory_order_relaxed);
   loopback_ = loopback;
   preferredPeriodHns_ = (preferredPeriodHns > 0) ? preferredPeriodHns : 50000;
 
@@ -183,9 +186,9 @@ bool WasapiCapture::Init(IMMDevice* dev, bool loopback, REFERENCE_TIME preferred
 
 bool WasapiCapture::Start()
 {
-  if (!ring_)
+  if (!ring_ || !client_ || !capture_ || !dataEvent_ || !stopEvent_)
   {
-    std::fprintf(stderr, "[WasapiCapture] SetRing() not called before Start()\n");
+    std::fprintf(stderr, "[WasapiCapture] Start requested before successful Init / SetRing\n");
     return false;
   }
   if (running_.exchange(true))
@@ -204,12 +207,13 @@ bool WasapiCapture::Start()
 
 void WasapiCapture::Stop()
 {
-  if (!running_.exchange(false))
-    return;
-  if (stopEvent_) SetEvent(stopEvent_);
+  const bool wasRunning = running_.exchange(false, std::memory_order_relaxed);
+  if (wasRunning && stopEvent_) SetEvent(stopEvent_);
+  // Join even when the worker exited because of an error; otherwise its std::thread
+  // remains joinable and a later restart/destructor can terminate the process.
   if (thread_.joinable()) thread_.join();
   if (client_) {
-    client_->Stop();
+    if (wasRunning) client_->Stop();
     client_.Reset();
   }
   capture_.Reset();
@@ -223,29 +227,68 @@ void WasapiCapture::ThreadProc()
   HANDLE mmcss = AvSetMmThreadCharacteristicsW(L"Pro Audio", &taskIndex);
 
   const size_t bpf = fmt_.bytesPerFrame();
+  auto recordError = [&]() {
+    failed_.store(true, std::memory_order_relaxed);
+    if (diagnostics_)
+      diagnostics_->captureWasapiErrors.fetch_add(1, std::memory_order_relaxed);
+  };
 
-  auto drain = [&]() {
-    UINT32 packet = 0;
-    while (SUCCEEDED(capture_->GetNextPacketSize(&packet)) && packet > 0)
+  auto drain = [&]() -> bool {
+    for (;;)
     {
+      UINT32 packet = 0;
+      HRESULT hr = capture_->GetNextPacketSize(&packet);
+      if (FAILED(hr))
+      {
+        std::fprintf(stderr, "[WasapiCapture] GetNextPacketSize failed: %s\n", HrStr(hr).c_str());
+        recordError();
+        return false;
+      }
+      if (packet == 0) return true;
+
       BYTE* data = nullptr;
       UINT32 frames = 0;
       DWORD flags = 0;
-      if (FAILED(capture_->GetBuffer(&data, &frames, &flags, nullptr, nullptr)))
-        break;
+      hr = capture_->GetBuffer(&data, &frames, &flags, nullptr, nullptr);
+      if (FAILED(hr))
+      {
+        std::fprintf(stderr, "[WasapiCapture] GetBuffer failed: %s\n", HrStr(hr).c_str());
+        recordError();
+        return false;
+      }
 
       const size_t bytes = static_cast<size_t>(frames) * bpf;
+      size_t written = 0;
       if (flags & AUDCLNT_BUFFERFLAGS_SILENT)
       {
         static thread_local std::vector<uint8_t> zeros;
-        if (zeros.size() < bytes) zeros.assign(bytes, 0);
-        ring_->Write(zeros.data(), bytes);
+        if (zeros.size() < bytes) zeros.resize(bytes, 0);
+        written = ring_->Write(zeros.data(), bytes);
       }
       else if (data)
       {
-        ring_->Write(data, bytes);
+        written = ring_->Write(data, bytes);
       }
-      capture_->ReleaseBuffer(frames);
+      else if (bytes > 0)
+      {
+        // A null data pointer without SILENT is unexpected; preserve stream timing
+        // with silence rather than feeding uninitialized memory into the encoder.
+        static thread_local std::vector<uint8_t> zeros;
+        if (zeros.size() < bytes) zeros.resize(bytes, 0);
+        written = ring_->Write(zeros.data(), bytes);
+      }
+
+      if (diagnostics_ && bpf > 0 && written < bytes)
+        diagnostics_->captureDroppedFrames.fetch_add((bytes - written) / bpf,
+                                                      std::memory_order_relaxed);
+
+      hr = capture_->ReleaseBuffer(frames);
+      if (FAILED(hr))
+      {
+        std::fprintf(stderr, "[WasapiCapture] ReleaseBuffer failed: %s\n", HrStr(hr).c_str());
+        recordError();
+        return false;
+      }
     }
   };
 
@@ -263,20 +306,28 @@ void WasapiCapture::ThreadProc()
       {
         std::fprintf(stderr, "[WasapiCapture] WaitForMultipleObjects failed: %lu\n",
                      GetLastError());
+        recordError();
         break;
       }
-      // Drain on a data event, or on the legacy loopback polling timeout.
-      drain();
+      // Loopback's 5 ms timeout is only a compatibility poll. It is not counted
+      // as an event timeout because it is expected on older Windows builds.
+      if (!drain()) break;
     }
   }
   else
   {
-    // Defensive fallback; successfully initialized streams should be event-driven.
     while (running_.load(std::memory_order_relaxed))
     {
-      if (WaitForSingleObject(stopEvent_, 5) == WAIT_OBJECT_0)
+      const DWORD w = WaitForSingleObject(stopEvent_, 5);
+      if (w == WAIT_OBJECT_0) break;
+      if (w == WAIT_FAILED)
+      {
+        std::fprintf(stderr, "[WasapiCapture] WaitForSingleObject failed: %lu\n",
+                     GetLastError());
+        recordError();
         break;
-      drain();
+      }
+      if (!drain()) break;
     }
   }
 
