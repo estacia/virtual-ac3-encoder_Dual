@@ -89,7 +89,7 @@ int g_dtsBitrate = 0; // 0=Full 1536k, 1=Half 768k
 int g_ac3Bitrate = 0; // 0=640k, 1=448k
 int g_latencyPreset = 2; // 0=Extreme, 1=Fast, 2=Balanced, 3=Safe, 4=Relaxed
 int g_upmixMode = 0; // 0=Dynamic Surround, 6=Dual Stereo Copy, 7=Off
-bool g_loopback = false;
+bool g_loopback = true;
 bool g_outAutoSpdif = true;
 int  g_reloadId = 1;
 
@@ -446,7 +446,7 @@ void TriggerApplySettings() {
 void LoadConfiguration() {
     Kv cfg = ReadKv(g_configPath);
 
-    g_loopback = (cfg.find("loopback") != cfg.end()) && (cfg["loopback"] == "1");
+    g_loopback = (cfg.find("loopback") == cfg.end()) || (cfg["loopback"] == "1");
     g_outAutoSpdif = (cfg["out_spdif"] == "1") || (cfg.find("out_id") == cfg.end() && cfg.find("out") == cfg.end());
 
     RefreshDevices();
@@ -1103,15 +1103,15 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int) {
         // --- 3. Audio Routing & Hardware Configuration ---
         if (ImGui::CollapsingHeader("AUDIO ROUTING & FORMAT", ImGuiTreeNodeFlags_DefaultOpen)) {
             // Loopback Capture Toggle
-            if (ImGui::Checkbox("WASAPI Loopback Capture (use CABLE Input playback endpoint)", &g_loopback)) {
+            if (ImGui::Checkbox("WASAPI Loopback Capture (required for render-only virtual 5.1)", &g_loopback)) {
                 const auto& newDevs = g_loopback ? g_renderDevices : g_captureDevices;
                 g_selectedInDevice = FindDeviceBySubstring(newDevs, g_loopback ? "CABLE Input" : "CABLE Output");
                 if (g_selectedInDevice < 0 && !newDevs.empty()) g_selectedInDevice = 0;
                 TriggerApplySettings();
             }
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Loopback capture cannot request a custom IAudioClient3 period. Disable this option to capture from CABLE Output directly and request a low-latency shared-mode period.");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Keep enabled when using the render-only Virtual AC3 Encoder 5.1 WaveRT device. Disable only when selecting a real recording endpoint such as VB-CABLE CABLE Output; that path can request a low-latency IAudioClient3 shared-mode period.");
             ImGui::SameLine();
-            ImGui::TextDisabled(g_loopback ? "(Loopback: Windows engine default period)" : "(Direct capture: IAudioClient3 5 ms request; 10 ms in Safe/Relaxed)");
+            ImGui::TextDisabled(g_loopback ? "(Render endpoint: Windows engine default period)" : "(Recording endpoint: IAudioClient3 5 ms request when supported; 10 ms in Safe/Relaxed)");
 
             const auto& inDevs = g_loopback ? g_renderDevices : g_captureDevices;
 
