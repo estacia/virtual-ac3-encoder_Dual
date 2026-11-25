@@ -1,0 +1,1 @@
+Second temporary trigger to force pull_request synchronize after WDK NuGet update.
