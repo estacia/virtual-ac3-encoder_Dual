@@ -331,6 +331,95 @@ TEST_CASE("dynamic upmix: stereo-in-5.1 gets upmixed to real surround")
   CHECK(surrOn > 10.0 * surrOff);
 }
 
+TEST_CASE("dynamic upmix: native 5.1 bypasses FFT processing while discrete channels are active")
+{
+  SpdifEncoder::Params p;
+  p.sampleRate = 48000;
+  p.inSampleFmt = AV_SAMPLE_FMT_FLT;
+  p.upmix = SpdifEncoder::Upmix::Surround;
+  AVChannelLayout lay51 = AV_CHANNEL_LAYOUT_5POINT1_BACK;
+  av_channel_layout_copy(&p.inLayout, &lay51);
+  SpdifEncoder enc;
+  const bool ok = enc.Init(p);
+  av_channel_layout_uninit(&p.inLayout);
+  REQUIRE(ok);
+
+  const uint64_t before = enc.FilterProcessedFrames();
+  const int fpp = enc.FramesPerPacket();
+  std::vector<float> in(static_cast<size_t>(fpp) * 6, 0.0f);
+  std::vector<uint8_t> out(SpdifEncoder::kMaxBytesPerPacket);
+  for (int pk = 0; pk < 12; ++pk)
+  {
+    for (int i = 0; i < fpp; ++i)
+    {
+      const double phase = 2.0 * kPi * double(pk * fpp + i) / 48000.0;
+      in[static_cast<size_t>(i) * 6 + 0] = 0.20f * static_cast<float>(std::sin(440.0 * phase));
+      in[static_cast<size_t>(i) * 6 + 1] = 0.19f * static_cast<float>(std::sin(554.0 * phase));
+      in[static_cast<size_t>(i) * 6 + 2] = 0.18f * static_cast<float>(std::sin(660.0 * phase));
+      in[static_cast<size_t>(i) * 6 + 3] = 0.12f * static_cast<float>(std::sin(110.0 * phase));
+      in[static_cast<size_t>(i) * 6 + 4] = 0.17f * static_cast<float>(std::sin(330.0 * phase));
+      in[static_cast<size_t>(i) * 6 + 5] = 0.16f * static_cast<float>(std::sin(392.0 * phase));
+    }
+    REQUIRE(enc.EncodePacket(reinterpret_cast<const uint8_t*>(in.data()), out.data(),
+                             static_cast<int>(out.size())) > 0);
+  }
+
+  CHECK(enc.FilterProcessedFrames() == before);
+  CHECK(enc.GetFilterStatus() == SpdifEncoder::FilterStatus::NativeBypass);
+  CHECK(enc.FilterFifoFrames() == 0);
+}
+
+TEST_CASE("dynamic upmix: FFT is pre-warmed during the native-layout hold before stereo resumes")
+{
+  SpdifEncoder::Params p;
+  p.sampleRate = 48000;
+  p.inSampleFmt = AV_SAMPLE_FMT_FLT;
+  p.upmix = SpdifEncoder::Upmix::Surround;
+  AVChannelLayout lay51 = AV_CHANNEL_LAYOUT_5POINT1_BACK;
+  av_channel_layout_copy(&p.inLayout, &lay51);
+  SpdifEncoder enc;
+  const bool ok = enc.Init(p);
+  av_channel_layout_uninit(&p.inLayout);
+  REQUIRE(ok);
+
+  const int fpp = enc.FramesPerPacket();
+  std::vector<float> in(static_cast<size_t>(fpp) * 6, 0.0f);
+  std::vector<uint8_t> out(SpdifEncoder::kMaxBytesPerPacket);
+
+  // A native Center signal enters the three-second native-layout hold.
+  for (int i = 0; i < fpp; ++i)
+    in[static_cast<size_t>(i) * 6 + 2] =
+        0.2f * static_cast<float>(std::sin(2.0 * kPi * 660.0 * i / 48000.0));
+  const uint64_t beforeNative = enc.FilterProcessedFrames();
+  REQUIRE(enc.EncodePacket(reinterpret_cast<const uint8_t*>(in.data()), out.data(),
+                           static_cast<int>(out.size())) > 0);
+  CHECK(enc.FilterProcessedFrames() == beforeNative);
+  CHECK(enc.GetFilterStatus() == SpdifEncoder::FilterStatus::NativeBypass);
+
+  // Front-only packets warm the FFT while the existing native-layout hold is active.
+  for (int pk = 0; pk < 100; ++pk)
+  {
+    for (int i = 0; i < fpp; ++i)
+    {
+      const double phase = 2.0 * kPi * double(pk * fpp + i) / 48000.0;
+      in[static_cast<size_t>(i) * 6 + 0] =
+          0.2f * static_cast<float>(std::sin(440.0 * phase));
+      in[static_cast<size_t>(i) * 6 + 1] =
+          0.2f * static_cast<float>(std::sin(554.0 * phase));
+      in[static_cast<size_t>(i) * 6 + 2] = 0.0f;
+      in[static_cast<size_t>(i) * 6 + 3] = 0.0f;
+      in[static_cast<size_t>(i) * 6 + 4] = 0.0f;
+      in[static_cast<size_t>(i) * 6 + 5] = 0.0f;
+    }
+    REQUIRE(enc.EncodePacket(reinterpret_cast<const uint8_t*>(in.data()), out.data(),
+                             static_cast<int>(out.size())) > 0);
+  }
+
+  CHECK(enc.FilterProcessedFrames() > beforeNative);
+  CHECK(enc.FilterFifoFrames() <= enc.FilterFifoTargetFrames());
+  CHECK(enc.GetFilterStatus() == SpdifEncoder::FilterStatus::DynamicStereo);
+}
+
 // Dynamic upmix should pass real 5.1 content through without mangling it: when all 6 channels
 // carry signal, the swr multichannel path should be used (no stereo extraction/upmix).
 TEST_CASE("dynamic upmix: real 5.1 content passes through unchanged")
