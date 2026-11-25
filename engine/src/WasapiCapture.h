@@ -31,13 +31,13 @@ public:
   WasapiCapture() = default;
   ~WasapiCapture();
 
-  // Opens `dev` for shared capture and learns its mix format.
-  //   loopback == false: a real capture endpoint, event-driven.
-  //   loopback == true : a RENDER endpoint captured via AUDCLNT_STREAMFLAGS_LOOPBACK (polled;
-  //                      loopback streams don't support event-driven mode). This is how the
-  //                      engine reads the virtual 5.1 sink's mix.
-  //   bufferHns: WASAPI buffer duration in 100ns units (e.g. 100000 = 10ms, 200000 = 20ms)
-  bool Init(IMMDevice* dev, bool loopback = false, REFERENCE_TIME bufferHns = 100000);
+  // Opens `dev` for shared event-driven capture and learns its mix format.
+  //   loopback == false: a real capture endpoint; uses IAudioClient3 when available.
+  //   loopback == true : a RENDER endpoint captured via event-driven LOOPBACK.
+  //                      A short polling fallback supports older loopback implementations.
+  //   preferredPeriodHns: requested IAudioClient3 period in 100ns units (default 50000 = 5ms).
+  //                       Loopback and fallback paths use the Windows audio-engine period.
+  bool Init(IMMDevice* dev, bool loopback = false, REFERENCE_TIME preferredPeriodHns = 50000);
   // Destination ring for captured samples (set before Start, once it can be sized).
   void SetRing(RingBuffer* ring) { ring_ = ring; }
   bool Start();
@@ -55,7 +55,7 @@ private:
 
   bool                      loopback_ = false;
   bool                      isEventDriven_ = false;
-  REFERENCE_TIME            bufferHns_ = 100000;
+  REFERENCE_TIME            preferredPeriodHns_ = 50000;
   HANDLE                    dataEvent_ = nullptr;
   HANDLE                    stopEvent_ = nullptr;
   std::thread               thread_;

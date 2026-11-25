@@ -377,10 +377,10 @@ int main(int argc, char** argv)
       if (!ResolveOutput(c, outDev, outInfo)) return false;
       std::printf("Output  : %s %s\n", Narrow(outInfo.name.c_str()).c_str(), outInfo.isSpdif ? "[SPDIF]" : "");
 
-      const REFERENCE_TIME capBufferHns =
-          (c.latencyMode == "relaxed" || c.latencyMode == "safe") ? 200000 : 100000;
+      const REFERENCE_TIME capturePeriodHns =
+          (c.latencyMode == "relaxed" || c.latencyMode == "safe") ? 100000 : 50000;
       capture = std::make_unique<WasapiCapture>();
-      if (!capture->Init(inDev.Get(), c.loopback, capBufferHns)) return false;
+      if (!capture->Init(inDev.Get(), c.loopback, capturePeriodHns)) return false;
 
       const CaptureFormat& cf = capture->Format();
       const size_t ringBytes = static_cast<size_t>(8) * 1536 * cf.bytesPerFrame();

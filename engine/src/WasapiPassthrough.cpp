@@ -451,17 +451,20 @@ void WasapiPassthrough::ThreadProc()
       if (avail < minAvail_)
         minAvail_ = avail;
 
-      // Evaluate drift over a ~2-second window (e.g. 64 cycles for AC3 @ 32ms, 192 cycles for DTS @ 10.6ms)
-      const uint32_t driftCycles = (framesPerPacket_ <= 512) ? 192 : 64;
+      // Evaluate drift over roughly one second for either codec:
+      // 32 AC-3 cycles * 32 ms, or 96 DTS cycles * 10.67 ms.
+      const uint32_t driftCycles = (framesPerPacket_ <= 512) ? 96 : 32;
       if (cycle_++ % driftCycles == 0)
       {
-        // Only trim if the MINIMUM available buffer over the entire window has exceeded desired + hysteresis.
-        // This deadband ensures that normal OS thread scheduling jitter (+-3-5 ms) never causes an underrun.
-        const uint32_t hysteresis = std::max<uint32_t>(static_cast<uint32_t>(framesPerPacket_) * 2, 1024u);
+        // Only trim if even the MINIMUM queue depth over the full window stays
+        // above target. Keep at least one codec frame of deadband so ordinary
+        // scheduling jitter does not trigger a correction.
+        const uint32_t hysteresis =
+            std::max<uint32_t>(static_cast<uint32_t>(framesPerPacket_), params_.safeFrames);
         if (minAvail_ != 0xFFFFFFFFu && minAvail_ > desired + hysteresis)
         {
           const uint32_t excess = minAvail_ - (desired + hysteresis / 2);
-          const uint32_t maxTrim = framesPerPacket_ / 2; // Trim gently in small steps
+          const uint32_t maxTrim = std::max<uint32_t>(1, framesPerPacket_ / 8); // <= 4 ms AC-3 / 1.33 ms DTS
           const uint32_t trim = std::min(excess, maxTrim);
           ring_->Discard(static_cast<size_t>(trim) * capBytesPerFrame_);
         }

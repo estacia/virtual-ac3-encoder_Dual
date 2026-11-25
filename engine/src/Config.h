@@ -35,29 +35,31 @@ struct Config
     const bool dts = (outputMode == "dts");
     if (dts)
     {
-      // DTS frames are 512 samples. WASAPI shared-mode capture operates on a 480-sample (10 ms) quantum.
-      // Generous buffer reserve floors absorb packet boundary jitter and OS thread scheduling latency.
+      // DTS frames are 512 samples (10.67 ms at 48 kHz). Keep at least one
+      // complete DTS frame as the Extreme cushion; larger presets add jitter margin.
       if (latencyMode == "extreme" || latencyMode == "ultra")
         return 512;
       if (latencyMode == "fast" || latencyMode == "low")
-        return 768;
+        return 640;
       if (latencyMode == "balanced")
-        return 1024;
+        return 768;
       if (latencyMode == "safe")
-        return 1536;
-      return 2048;
+        return 1024;
+      return 1536;
     }
 
+    // AC-3 frames are 1536 samples (32 ms at 48 kHz). This is an additional
+    // pre-roll cushion on top of the mandatory codec/output frames, not a packet size.
     if (latencyMode == "extreme" || latencyMode == "ultra")
       return 256;
     if (latencyMode == "fast" || latencyMode == "low")
-      return 512;
+      return 384;
     if (latencyMode == "balanced")
-      return 768;
+      return 512;
     if (latencyMode == "safe")
-      return 1024;
+      return 768;
     // "relaxed", "normal", or default
-    return 1536;
+    return 1024;
   }
 
   // Stereo->5.1 handling: "off", "surround" (FFmpeg FFT upmix), or "dual_stereo"
