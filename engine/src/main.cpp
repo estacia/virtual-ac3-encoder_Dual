@@ -425,6 +425,8 @@ int main(int argc, char** argv)
         pp.bitRate = c.bitRate;
         pp.dtsBitRate = c.dtsBitRate;
         pp.safeFrames = effectiveSafe;
+        pp.surroundWindowSize =
+            (c.latencyMode == "extreme" || c.latencyMode == "ultra") ? 1024 : 4096;
         if (c.upmix == "dual_stereo" || c.upmix == "dual-stereo" || c.upmix == "copy")
           pp.upmix = SpdifEncoder::Upmix::DualStereo;
         else if (c.upmix == "always")

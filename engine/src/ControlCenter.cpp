@@ -88,6 +88,8 @@ int g_outputMode = 0; // 0=DTS 5.1, 1=AC3 5.1, 2=PCM Stereo
 int g_dtsBitrate = 0; // 0=Full 1536k, 1=Half 768k
 int g_ac3Bitrate = 0; // 0=640k, 1=448k
 int g_latencyPreset = 2; // 0=Extreme, 1=Fast, 2=Balanced, 3=Safe, 4=Relaxed
+int g_safeFrames = 128;
+bool g_useCustomSafeFrames = false;
 int g_upmixMode = 0; // 0=Dynamic Surround, 6=Dual Stereo Copy, 7=Off
 bool g_loopback = true;
 bool g_outAutoSpdif = true;
@@ -426,7 +428,10 @@ void SaveConfiguration(int reloadId = 0) {
 
     const char* latencies[] = {"extreme", "fast", "balanced", "safe", "relaxed"};
     cfg["latency"] = latencies[std::clamp(g_latencyPreset, 0, 4)];
-    cfg.erase("safe"); // Use preset
+    if (g_useCustomSafeFrames)
+        cfg["safe"] = std::to_string(std::clamp(g_safeFrames, 32, 1536));
+    else
+        cfg.erase("safe");
 
     const char* upmixes[] = {"dynamic", "front", "3.0", "2.1", "always", "always_front", "dual_stereo", "off"};
     cfg["upmix"] = upmixes[std::clamp(g_upmixMode, 0, 7)];
@@ -483,6 +488,20 @@ void LoadConfiguration() {
     else if (lat == "safe") g_latencyPreset = 3;
     else if (lat == "relaxed" || lat == "normal") g_latencyPreset = 4;
     else g_latencyPreset = 2; // balanced
+
+    g_safeFrames = 128;
+    g_useCustomSafeFrames = false;
+    if (!cfg["safe"].empty()) {
+        try {
+            const int loadedSafeFrames = std::stoi(cfg["safe"]);
+            if (loadedSafeFrames > 0) {
+                g_safeFrames = std::clamp(loadedSafeFrames, 32, 1536);
+                g_useCustomSafeFrames = true;
+            }
+        } catch (...) {
+            g_useCustomSafeFrames = false;
+        }
+    }
 
     const std::string up = cfg["upmix"];
     if (up == "off") g_upmixMode = 7;
@@ -1217,7 +1236,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int) {
 
             // Latency Presets
             const char* latencies[] = {
-                "Extreme (AC-3/DTS: 256/512 samples) - Lowest Cushion",
+                "Extreme (AC-3/DTS: 128/512 samples) - Lowest Cushion",
                 "Fast (384/640 samples) - Low Latency",
                 "Balanced (512/768 samples) - Recommended",
                 "Safe (768/1024 samples) - High Stability",
@@ -1225,6 +1244,18 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int) {
             };
             if (ImGui::Combo("Latency Preset", &g_latencyPreset, latencies, IM_ARRAYSIZE(latencies))) {
                 TriggerApplySettings();
+            }
+
+            if (ImGui::Checkbox("Override SafeFrames (experimental)", &g_useCustomSafeFrames)) {
+                if (g_useCustomSafeFrames && g_safeFrames <= 0)
+                    g_safeFrames = 128;
+                TriggerApplySettings();
+            }
+            if (g_useCustomSafeFrames) {
+                if (ImGui::SliderInt("SafeFrames (samples)", &g_safeFrames, 32, 1536, "%d")) {
+                    TriggerApplySettings();
+                }
+                ImGui::TextDisabled("Lower values reduce the input cushion but increase dropout risk. Try 128 first; 64 is aggressive.");
             }
 
             // Stereo Upmixing

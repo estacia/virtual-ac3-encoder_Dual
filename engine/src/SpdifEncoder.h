@@ -83,6 +83,7 @@ public:
     AVChannelLayout inLayout{};                     // caller-owned; copied in Init().
                                                     // Any layout; downmixed to 5.1 by swr.
     Upmix upmix = Upmix::Off;                       // stereo->5.1 upmix mode
+    int surroundWindowSize = 4096;                  // FFmpeg surround FFT window (1024 for Extreme)
   };
 
   // Open the encoder. Returns false (and logs to stderr) on failure.
@@ -151,6 +152,10 @@ private:
   AVFilterContext* fsink_     = nullptr; // abuffersink
   AVAudioFifo*     fifo_      = nullptr; // accumulates filtered 5.1 fltp samples
   AVFrame*         filtFrame_ = nullptr; // scratch for draining the sink
+  AVFrame*         filterInputFrame_ = nullptr; // reusable, preallocated filter input frame
+  int64_t          filterInputPts_ = 0;
+  int              surroundWindowSize_ = 4096;
+  int              surroundHopFrames_ = kSurroundFilterHopFrames;
 
   // Dynamic upmix: input is multichannel (e.g. 5.1 cable) but we detect at runtime
   // whether the content is actually stereo (non-FL/FR channels silent) and upmix it.

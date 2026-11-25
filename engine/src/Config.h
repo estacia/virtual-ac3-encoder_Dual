@@ -51,7 +51,7 @@ struct Config
     // AC-3 frames are 1536 samples (32 ms at 48 kHz). This is an additional
     // pre-roll cushion on top of the mandatory codec/output frames, not a packet size.
     if (latencyMode == "extreme" || latencyMode == "ultra")
-      return 256;
+      return 128;
     if (latencyMode == "fast" || latencyMode == "low")
       return 384;
     if (latencyMode == "balanced")

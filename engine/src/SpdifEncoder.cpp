@@ -68,14 +68,14 @@ uint32_t SpdifEncoder::FilterFifoTargetFrames() const
 {
   if (!useFilter_ && !dynamicUpmix_)
     return 0;
-  const int minimum = std::max(framesPerPacket_, kSurroundFilterHopFrames);
+  const int minimum = std::max(framesPerPacket_, surroundHopFrames_);
   return static_cast<uint32_t>(minimum + framesPerPacket_);
 }
 
 uint32_t SpdifEncoder::FilterHopFrames() const
 {
   return (useFilter_ || dynamicUpmix_)
-      ? static_cast<uint32_t>(kSurroundFilterHopFrames) : 0;
+      ? static_cast<uint32_t>(surroundHopFrames_) : 0;
 }
 
 void SpdifEncoder::SetChannelGainsDb(const std::array<float, 6>& gainsDb)
@@ -142,6 +142,8 @@ bool SpdifEncoder::Init(const Params& p)
   Close();
 
   av_channel_layout_copy(&inLayout_, &p.inLayout);
+  surroundWindowSize_ = std::clamp(p.surroundWindowSize, 1024, 65536);
+  surroundHopFrames_ = std::max(1, surroundWindowSize_ / 2);
   inSampleFmt_ = p.inSampleFmt;
   sampleRate_ = p.sampleRate;
   nextPts_ = 0;
@@ -306,7 +308,7 @@ bool SpdifEncoder::Init(const Params& p)
     dynamicFilterWarmupFrames_ = 0;
     dynamicFilterActive_ = false;
     dynamicFilterPrimed_ = fifo_ &&
-        av_audio_fifo_size(fifo_) >= std::max(framesPerPacket_, kSurroundFilterHopFrames);
+        av_audio_fifo_size(fifo_) >= std::max(framesPerPacket_, surroundHopFrames_);
   }
 
   return true;
@@ -328,6 +330,10 @@ void SpdifEncoder::Close()
   }
   if (graph_)     avfilter_graph_free(&graph_);
   fsrc_ = fsink_ = nullptr;
+  if (filterInputFrame_) av_frame_free(&filterInputFrame_);
+  filterInputPts_ = 0;
+  surroundWindowSize_ = 4096;
+  surroundHopFrames_ = kSurroundFilterHopFrames;
   if (fifo_)      { av_audio_fifo_free(fifo_); fifo_ = nullptr; }
   if (filtFrame_) av_frame_free(&filtFrame_);
   useFilter_ = false;
@@ -388,20 +394,20 @@ bool SpdifEncoder::BuildFilterGraph()
   if (isFront30)
   {
     std::snprintf(surArgs, sizeof surArgs,
-                  "chl_in=%s:chl_out=%s:fc_out=1.0:lfe_out=0.0:bl_out=0:br_out=0:sl_out=0:sr_out=0:bc_out=0",
-                  inDesc, outDesc);
+                  "chl_in=%s:chl_out=%s:fc_out=1.0:lfe_out=0.0:bl_out=0:br_out=0:sl_out=0:sr_out=0:bc_out=0:win_size=%d:overlap=0.5",
+                  inDesc, outDesc, surroundWindowSize_);
   }
   else if (isFront31 || isSub21)
   {
     std::snprintf(surArgs, sizeof surArgs,
-                  "chl_in=%s:chl_out=%s:fc_out=1.0:lfe_out=1.2:lfe_low=140:bl_out=0:br_out=0:sl_out=0:sr_out=0:bc_out=0",
-                  inDesc, outDesc);
+                  "chl_in=%s:chl_out=%s:fc_out=1.0:lfe_out=1.2:lfe_low=140:bl_out=0:br_out=0:sl_out=0:sr_out=0:bc_out=0:win_size=%d:overlap=0.5",
+                  inDesc, outDesc, surroundWindowSize_);
   }
   else
   {
     std::snprintf(surArgs, sizeof surArgs,
-                  "chl_in=%s:chl_out=%s:fc_out=1.0:lfe_out=1.2:lfe_low=140",
-                  inDesc, outDesc);
+                  "chl_in=%s:chl_out=%s:fc_out=1.0:lfe_out=1.2:lfe_low=140:win_size=%d:overlap=0.5",
+                  inDesc, outDesc, surroundWindowSize_);
   }
   char fmtArgs[256];
   std::snprintf(fmtArgs, sizeof fmtArgs, "sample_fmts=fltp:sample_rates=%d:channel_layouts=%s",
@@ -429,11 +435,21 @@ bool SpdifEncoder::BuildFilterGraph()
 
   fifo_ = av_audio_fifo_alloc(AV_SAMPLE_FMT_FLTP, codecCtx_->ch_layout.nb_channels, sampleRate_);
   filtFrame_ = av_frame_alloc();
-  if (!fifo_ || !filtFrame_) return false;
+  filterInputFrame_ = av_frame_alloc();
+  if (!fifo_ || !filtFrame_ || !filterInputFrame_) return false;
+
+  filterInputFrame_->format = inSampleFmt_;
+  filterInputFrame_->sample_rate = sampleRate_;
+  filterInputFrame_->nb_samples = framesPerPacket_;
+  rc = av_channel_layout_copy(&filterInputFrame_->ch_layout, &filterInLayout_);
+  if (rc < 0) { LogAv("av_channel_layout_copy(filter input)", rc); return false; }
+  rc = av_frame_get_buffer(filterInputFrame_, 0);
+  if (rc < 0) { LogAv("av_frame_get_buffer(filter input)", rc); return false; }
+  filterInputPts_ = 0;
 
   // Prime the FIFO past the 2048-sample FFT hop of FFmpeg's `surround` filter so
   // both 1536-sample AC3 and 512-sample DTS packets never underrun between FFT hops.
-  const int primeTarget = std::max(framesPerPacket_, kSurroundFilterHopFrames);
+  const int primeTarget = std::max(framesPerPacket_, surroundHopFrames_);
   const int inBytes =
       framesPerPacket_ * filterInLayout_.nb_channels * av_get_bytes_per_sample(inSampleFmt_);
   std::vector<uint8_t> silence(static_cast<size_t>(inBytes), 0);
@@ -442,30 +458,33 @@ bool SpdifEncoder::BuildFilterGraph()
       break;
 
   const char* modeName = isFront30 ? "3.0 front stage" : (isSub21 ? "2.1 stereo+sub" : (isFront31 ? "3.1 front stage (Center+Sub)" : "surround"));
-  std::printf("[SpdifEncoder] %s upmix enabled%s (%s -> %s)\n",
+  std::printf("[SpdifEncoder] %s upmix enabled%s (%s -> %s; window=%d, hop=%d frames / %.2f ms)\n",
               modeName,
               dynamicUpmix_ ? " (dynamic: auto-detect stereo in multichannel)" : "",
-              inDesc, outDesc);
+              inDesc, outDesc, surroundWindowSize_, surroundHopFrames_,
+              1000.0 * surroundHopFrames_ / sampleRate_);
   return true;
 }
 
 bool SpdifEncoder::FeedFilter(const uint8_t* in)
 {
+  if (!in || !filterInputFrame_ || !fsrc_ || !fsink_)
+    return false;
+
   const int inBytes =
       framesPerPacket_ * filterInLayout_.nb_channels * av_get_bytes_per_sample(inSampleFmt_);
 
-  AVFrame* f = av_frame_alloc();
-  if (!f) return false;
-  f->format = inSampleFmt_;
-  av_channel_layout_copy(&f->ch_layout, &filterInLayout_);
-  f->sample_rate = sampleRate_;
-  f->nb_samples = framesPerPacket_;
-  if (av_frame_get_buffer(f, 0) < 0) { av_frame_free(&f); return false; }
-  std::memcpy(f->data[0], in, static_cast<size_t>(inBytes));
+  // Reuse one preallocated frame instead of allocating a new AVFrame and AVBuffer
+  // for every AC-3 packet. KEEP_REF lets the filter graph retain its own reference;
+  // after draining the sink, the next make_writable normally reuses the same buffer.
+  int rc = av_frame_make_writable(filterInputFrame_);
+  if (rc < 0) { LogAv("av_frame_make_writable(filter input)", rc); return false; }
+  std::memcpy(filterInputFrame_->data[0], in, static_cast<size_t>(inBytes));
+  filterInputFrame_->pts = filterInputPts_;
 
-  int rc = av_buffersrc_add_frame(fsrc_, f);
-  av_frame_free(&f);
-  if (rc < 0) { LogAv("av_buffersrc_add_frame", rc); return false; }
+  rc = av_buffersrc_add_frame_flags(fsrc_, filterInputFrame_, AV_BUFFERSRC_FLAG_KEEP_REF);
+  if (rc < 0) { LogAv("av_buffersrc_add_frame_flags", rc); return false; }
+  filterInputPts_ += framesPerPacket_;
   filterInputFramesProcessed_ += static_cast<uint64_t>(framesPerPacket_);
 
   for (;;)
@@ -507,7 +526,7 @@ int SpdifEncoder::EncodePacket(const uint8_t* in, uint8_t* outBuf, int outSize)
   {
     bool hasDiscreteActivity = false;
     const bool stereoSource = alwaysUpmix_ || IsEffectivelyStereo(in, &hasDiscreteActivity);
-    const int minPrimedFifo = std::max(framesPerPacket_, kSurroundFilterHopFrames);
+    const int minPrimedFifo = std::max(framesPerPacket_, surroundHopFrames_);
     const int maxActiveFifo = minPrimedFifo + framesPerPacket_;
 
     // A live Center/LFE/Surround signal is definitive native multichannel audio.
@@ -518,7 +537,7 @@ int SpdifEncoder::EncodePacket(const uint8_t* in, uint8_t* outBuf, int outSize)
       {
         av_audio_fifo_reset(fifo_);
         dynamicFilterNeedsWarmup_ = true;
-        dynamicFilterWarmupFrames_ = kSurroundFilterHopFrames;
+        dynamicFilterWarmupFrames_ = surroundHopFrames_;
         dynamicFilterPrimed_ = false;
       }
       dynamicFilterBypassed_ = true;

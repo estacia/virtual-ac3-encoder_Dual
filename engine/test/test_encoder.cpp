@@ -213,7 +213,7 @@ TEST_CASE("latency: Config::GetEffectiveSafeFrames scales correctly")
   // AC3 mode
   c.outputMode = "ac3";
   c.latencyMode = "extreme";
-  CHECK(c.GetEffectiveSafeFrames() == 256);
+  CHECK(c.GetEffectiveSafeFrames() == 128);
 
   c.latencyMode = "fast";
   CHECK(c.GetEffectiveSafeFrames() == 384);
@@ -227,10 +227,16 @@ TEST_CASE("latency: Config::GetEffectiveSafeFrames scales correctly")
   c.latencyMode = "relaxed";
   CHECK(c.GetEffectiveSafeFrames() == 1024);
 
-  // Custom numeric override
+  // Custom numeric override (including the aggressive 64-frame experiment).
   c.safeFrames = 333;
   c.customSafeFrames = true;
   CHECK(c.GetEffectiveSafeFrames() == 333);
+  c.safeFrames = 64;
+  CHECK(c.GetEffectiveSafeFrames() == 64);
+
+  // A zero override is ignored and falls back to the selected preset.
+  c.safeFrames = 0;
+  CHECK(c.GetEffectiveSafeFrames() == 1024);
 }
 
 TEST_CASE("telemetry: SpdifEncoder calculates channel peak and RMS levels")

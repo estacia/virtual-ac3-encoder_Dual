@@ -270,6 +270,9 @@ void WasapiPcmOutput::ThreadProc()
 {
   DWORD taskIndex = 0;
   HANDLE mmcss = AvSetMmThreadCharacteristicsW(L"Pro Audio", &taskIndex);
+  if (mmcss && !AvSetMmThreadPriority(mmcss, AVRT_PRIORITY_HIGH))
+    std::fprintf(stderr, "[WasapiPcmOutput] AvSetMmThreadPriority(HIGH) failed: %lu\n",
+                 GetLastError());
   const size_t stagingBytes = static_cast<size_t>(bufferFrames_) * capBytesPerFrame_;
   inputStaging_.assign(stagingBytes, 0);
 
