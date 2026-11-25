@@ -395,21 +395,23 @@ void SaveConfiguration(int reloadId = 0) {
     Kv cfg = ReadKv(g_configPath);
 
     const auto& inDevs = g_loopback ? g_renderDevices : g_captureDevices;
-    if (g_selectedInDevice >= 0 && static_cast<size_t>(g_selectedInDevice) < inDevs.size())
+    if (g_selectedInDevice >= 0 && static_cast<size_t>(g_selectedInDevice) < inDevs.size()) {
         cfg["in_id"] = ToUtf8(inDevs[static_cast<size_t>(g_selectedInDevice)].id);
+        cfg["in"] = ToUtf8(inDevs[static_cast<size_t>(g_selectedInDevice)].name);
+    }
 
     if (g_outAutoSpdif) {
         cfg["out_spdif"] = "1";
         cfg.erase("out_id");
         cfg.erase("out");
     } else {
-        if (g_selectedOutDevice >= 0 && static_cast<size_t>(g_selectedOutDevice) < g_renderDevices.size())
+        if (g_selectedOutDevice >= 0 && static_cast<size_t>(g_selectedOutDevice) < g_renderDevices.size()) {
             cfg["out_id"] = ToUtf8(g_renderDevices[static_cast<size_t>(g_selectedOutDevice)].id);
+            cfg["out"] = ToUtf8(g_renderDevices[static_cast<size_t>(g_selectedOutDevice)].name);
+        }
         cfg.erase("out_spdif");
-        cfg.erase("out");
     }
 
-    cfg.erase("in");
     cfg["loopback"] = g_loopback ? "1" : "0";
 
     if (g_outputMode == 0) {
