@@ -118,6 +118,7 @@ private:
   AVCodecContext*  codecCtx_ = nullptr;
   AVFormatContext* muxer_    = nullptr;
   SwrContext*      swr_      = nullptr;
+  SwrContext*      dualStereoSwr_ = nullptr; // two-channel conversion fast path for Dual Stereo Copy
   SwrContext*      dtsS32Swr_ = nullptr; // FLTP to packed S32 for DTS
   AVFrame*         frame_    = nullptr;  // planar-float processing frame
   AVFrame*         dtsFrame_  = nullptr;  // packed S32 frame for the DTS encoder
