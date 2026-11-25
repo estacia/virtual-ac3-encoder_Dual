@@ -1,0 +1,1 @@
+Follow-up synchronize trigger against current WDK NuGet path fixes.
