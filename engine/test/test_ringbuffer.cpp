@@ -169,13 +169,16 @@ TEST_CASE("frame-aligned ring buffer wraps on frame boundaries")
 {
   constexpr size_t kFrameBytes = 6; // S16 5.1
   RingBuffer rb(4 * kFrameBytes, kFrameBytes);
-  std::vector<uint8_t> a(4 * kFrameBytes, 0x11);
+  std::vector<uint8_t> a(3 * kFrameBytes, 0x11);
   std::vector<uint8_t> b(3 * kFrameBytes, 0x22);
   std::vector<uint8_t> out(3 * kFrameBytes);
 
+  // Advance both cursors to frame 3, then write three frames so the producer
+  // must split one aligned write across the physical end of the ring.
   CHECK(rb.Write(a.data(), a.size()) == a.size());
   CHECK(rb.Read(out.data(), out.size()) == out.size());
   CHECK(rb.Write(b.data(), b.size()) == b.size());
+  CHECK(rb.BytesAvailable() == out.size());
   CHECK(rb.Read(out.data(), out.size()) == out.size());
   CHECK(out.front() == 0x22);
   CHECK(out.back() == 0x22);
