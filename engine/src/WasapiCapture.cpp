@@ -297,7 +297,7 @@ void WasapiCapture::ThreadProc()
   if (isEventDriven_ && dataEvent_)
   {
     HANDLE waits[2] = { dataEvent_, stopEvent_ };
-    const DWORD timeoutMs = loopback_ ? 5 : INFINITE;
+    const DWORD timeoutMs = loopback_ ? 2 : INFINITE;
 
     while (running_.load(std::memory_order_relaxed))
     {
@@ -311,8 +311,8 @@ void WasapiCapture::ThreadProc()
         recordError();
         break;
       }
-      // Loopback's 5 ms timeout is only a compatibility poll. It is not counted
-      // as an event timeout because it is expected on older Windows builds.
+      // Loopback's 2 ms timeout is only a compatibility poll for systems where the
+      // event callback is unavailable; on supported systems the data event wakes us.
       if (!drain()) break;
     }
   }
