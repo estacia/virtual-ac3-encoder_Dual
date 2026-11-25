@@ -1,0 +1,122 @@
+name: One-time 0.2.5-beta Release
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/beta-release-once.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-publish:
+    runs-on: windows-2022
+    env:
+      TARGET_COMMIT: 92f350781d2537566386017345b78b02e2432931
+      RELEASE_VERSION: 0.2.5-beta
+    steps:
+      - name: Checkout requested merge commit
+        uses: actions/checkout@v4
+        with:
+          ref: 92f350781d2537566386017345b78b02e2432931
+
+      - name: Cache FFmpeg dev libs
+        id: ffcache
+        uses: actions/cache@v4
+        with:
+          path: third_party/ffmpeg
+          key: ffmpeg-${{ runner.os }}-${{ hashFiles('scripts/fetch-ffmpeg.ps1') }}
+
+      - name: Fetch FFmpeg
+        if: steps.ffcache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: ./scripts/fetch-ffmpeg.ps1
+
+      - name: Configure + build (Release)
+        shell: pwsh
+        run: |
+          cmake -S engine -B engine/build -G "Visual Studio 17 2022" -A x64 "-DVAC3_VERSION=$env:RELEASE_VERSION"
+          cmake --build engine/build --config Release
+
+      - name: Unit tests (ctest)
+        shell: pwsh
+        run: ctest --test-dir engine/build -C Release --output-on-failure
+
+      - name: Assemble portable package
+        shell: pwsh
+        run: |
+          $d = "dist"
+          New-Item -ItemType Directory -Force -Path "$d/scripts" | Out-Null
+          Copy-Item engine/build/Release/*.exe $d
+          Copy-Item engine/build/Release/*.dll $d
+          foreach ($x in 'VCRUNTIME140.dll','VCRUNTIME140_1.dll','MSVCP140.dll') {
+            Copy-Item "$env:WINDIR/System32/$x" $d -Force
+          }
+          Copy-Item scripts/*.ps1 "$d/scripts"
+          Copy-Item README.md,LICENSE,NOTICE.md,CLAUDE.md $d
+          Copy-Item installer/supervisor.vbs,installer/stop-engine.ps1,installer/app.ico $d
+          Copy-Item installer/quickstart.txt "$d/QUICKSTART.txt"
+          Copy-Item installer/default.conf "$d/virtual-ac3-encoder.conf"
+
+      - name: Create portable ZIP
+        shell: pwsh
+        run: Compress-Archive -Path dist/* -DestinationPath "virtual-ac3-encoder-$env:RELEASE_VERSION-win64.zip" -Force
+
+      - name: Build installer (Inno Setup)
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup -y --no-progress | Out-Null
+            $cmd = Get-Command ISCC.exe -ErrorAction SilentlyContinue
+            $iscc = if ($cmd) { $cmd.Source } else { "$env:ProgramData\chocolatey\bin\ISCC.exe" }
+          }
+          $src = (Resolve-Path dist).Path
+          & $iscc "/DAppVersion=$env:RELEASE_VERSION" "/DSourceDir=$src" installer/virtual-ac3-encoder.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed ($LASTEXITCODE)" }
+
+      - name: Publish GitHub prerelease
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "v$env:RELEASE_VERSION"
+          $releaseName = $env:RELEASE_VERSION
+          $zip = "virtual-ac3-encoder-$env:RELEASE_VERSION-win64.zip"
+          $exe = "installer/Output/virtual-ac3-encoder-setup-$env:RELEASE_VERSION.exe"
+          $notesFile = "release-notes.md"
+          @'
+          **Dolby Control Center — Beta release**
+
+          Built from merge commit `92f350781d2537566386017345b78b02e2432931`.
+
+          Real-time multichannel and stereo PCM to DTS 5.1 / Dolby Digital (AC-3) 5.1 / PCM 2.0 over IEC 61937 / S-PDIF (Toslink).
+
+          ## Downloads
+          - **virtual-ac3-encoder-setup-0.2.5-beta.exe** — Dolby Control Center installer.
+          - **virtual-ac3-encoder-0.2.5-beta-win64.zip** — portable build.
+
+          ## Requires
+          Install VB-CABLE, set CABLE Input as the default playback device, and connect an optical output to your receiver or soundbar.
+          '@ | Set-Content -Path $notesFile -Encoding utf8
+
+          gh release create $tag --repo $env:GITHUB_REPOSITORY --target $env:TARGET_COMMIT --title $releaseName --notes-file $notesFile --prerelease $zip $exe
+          if ($LASTEXITCODE -ne 0) { throw "GitHub Release creation failed ($LASTEXITCODE)" }
+
+          $release = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$tag" | ConvertFrom-Json
+          if ($release.name -ne $releaseName -or -not $release.prerelease) {
+            throw "Release metadata verification failed."
+          }
+          $tagRef = gh api "repos/$env:GITHUB_REPOSITORY/git/ref/tags/$tag" | ConvertFrom-Json
+          $tagObject = $tagRef.object
+          if ($tagObject.type -eq "tag") {
+            $annotated = gh api "repos/$env:GITHUB_REPOSITORY/git/tags/$($tagObject.sha)" | ConvertFrom-Json
+            $actualTarget = $annotated.object.sha
+          } else {
+            $actualTarget = $tagObject.sha
+          }
+          if ($actualTarget -ne $env:TARGET_COMMIT) {
+            throw "Tag target mismatch: expected $env:TARGET_COMMIT, got $actualTarget"
+          }
+          Write-Host "Verified $releaseName points to $actualTarget"
