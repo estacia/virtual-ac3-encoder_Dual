@@ -2,6 +2,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstddef>
 #include <windows.h>
 #include "AudioDiagnostics.h"
 
@@ -31,7 +32,7 @@ struct MeterSharedState
   volatile LONG64 driftTrimFrames;
   volatile LONG64 ringFillFrames;
   volatile LONG64 ringPeakFrames;
-  uint32_t ringCapacityFrames;
+  volatile LONG ringCapacityFrames;
 };
 #pragma pack(pop)
 
@@ -128,7 +129,7 @@ inline void PublishAudioDiagnostics(MeterSharedState* state, const AudioDiagnost
   const LONG64 fillFrames = bytesPerFrame
       ? static_cast<LONG64>(ringUsedBytes / bytesPerFrame) : 0;
   InterlockedExchange64(&state->ringFillFrames, fillFrames);
-  InterlockedExchange(&reinterpret_cast<volatile LONG*>(&state->ringCapacityFrames),
+  InterlockedExchange(&state->ringCapacityFrames,
       bytesPerFrame ? static_cast<LONG>(ringCapacityBytes / bytesPerFrame) : 0);
   LONG64 peak = InterlockedCompareExchange64(&state->ringPeakFrames, 0, 0);
   while (fillFrames > peak)
