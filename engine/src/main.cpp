@@ -168,6 +168,7 @@ static void ParseArgs(int argc, char** argv, Config& c)
     else if (a == "--list")       c.listDevices = true;
     else if (a == "--probe")      c.probe = true;
     else if (a == "--loopback")   c.loopback = true;
+    else if (a == "--direct-capture") c.loopback = false;
     else if (a == "--mon")        c.monitor = true;
     else if (a == "--duration" && i + 1 < argc) c.durationSeconds = (int)std::strtol(argv[++i], nullptr, 10);
     else if (a == "--in")         c.inName = next();
@@ -361,10 +362,12 @@ int main(int argc, char** argv)
     std::unique_ptr<WasapiPcmOutput> pcmOut;
     bool isPcm = false;
     bool running = false;
+    AudioDiagnostics diagnostics;
 
     bool Start(const Config& c)
     {
       Stop();
+      diagnostics.Reset();
 
       ComPtr<IMMDevice> inDev;
       EndpointInfo inInfo;
@@ -380,11 +383,11 @@ int main(int argc, char** argv)
       const REFERENCE_TIME capturePeriodHns =
           (c.latencyMode == "relaxed" || c.latencyMode == "safe") ? 100000 : 50000;
       capture = std::make_unique<WasapiCapture>();
-      if (!capture->Init(inDev.Get(), c.loopback, capturePeriodHns)) return false;
+      if (!capture->Init(inDev.Get(), c.loopback, capturePeriodHns, &diagnostics)) return false;
 
       const CaptureFormat& cf = capture->Format();
       const size_t ringBytes = static_cast<size_t>(8) * 1536 * cf.bytesPerFrame();
-      ring = std::make_unique<RingBuffer>(ringBytes);
+      ring = std::make_unique<RingBuffer>(ringBytes, cf.bytesPerFrame());
       capture->SetRing(ring.get());
 
       isPcm = (c.outputMode == "pcm");
@@ -403,7 +406,7 @@ int main(int argc, char** argv)
       if (isPcm)
       {
         pcmOut = std::make_unique<WasapiPcmOutput>();
-        if (!pcmOut->Init(outDev.Get(), ring.get(), cf, effectiveSafe)) { capture->Stop(); return false; }
+        if (!pcmOut->Init(outDev.Get(), ring.get(), cf, effectiveSafe, &diagnostics)) { capture->Stop(); return false; }
         if (!pcmOut->Start()) { std::fprintf(stderr, "PCM output start failed\n"); capture->Stop(); return false; }
       }
       else
@@ -431,7 +434,7 @@ int main(int argc, char** argv)
         else
           pp.upmix = SpdifEncoder::Upmix::Off;
 
-        if (!ac3Out->Init(outDev.Get(), ring.get(), cf, pp)) { capture->Stop(); return false; }
+        if (!ac3Out->Init(outDev.Get(), ring.get(), cf, pp, &diagnostics)) { capture->Stop(); return false; }
         if (!ac3Out->Start()) { std::fprintf(stderr, "AC3/DTS passthrough start failed\n"); capture->Stop(); return false; }
       }
 
@@ -439,16 +442,27 @@ int main(int argc, char** argv)
       return true;
     }
 
+    bool HasFailed() const
+    {
+      if (!running) return false;
+      if (capture && capture->HasFailed()) return true;
+      if (isPcm && pcmOut) return pcmOut->HasFailed();
+      if (ac3Out) return ac3Out->HasFailed();
+      return true;
+    }
+
     void Stop()
     {
-      if (!running) return;
-      if (capture) { capture->Stop(); capture.reset(); }
-      if (isPcm && pcmOut) { pcmOut->Stop(); pcmOut.reset(); }
+      const bool hadResources = capture || ring || pcmOut || ac3Out;
+      // Release the render endpoint first, then capture, so exclusive output devices
+      // are available as soon as a device-change recovery begins.
+      if (pcmOut) { pcmOut->Stop(); pcmOut.reset(); }
       if (ac3Out) { ac3Out->Stop(); ac3Out.reset(); }
+      if (capture) { capture->Stop(); capture.reset(); }
       ring.reset();
       running = false;
-      // Allow audio hardware state to settle out of exclusive mode before reopening
-      std::this_thread::sleep_for(std::chrono::milliseconds(40));
+      if (hadResources)
+        std::this_thread::sleep_for(std::chrono::milliseconds(40));
     }
 
     void SetChannelGainsDb(const std::array<float, 6>& gains)
@@ -475,10 +489,23 @@ int main(int argc, char** argv)
   pipeline.SetChannelGainsDb(lastGains);
   int lastReloadId = 0;
   auto start = std::chrono::steady_clock::now();
+  bool recoveryPending = !pipeline.running;
+  auto retryDelay = std::chrono::milliseconds(500);
+  auto nextRetry = std::chrono::steady_clock::now() + retryDelay;
 
   while (!g_stop.load())
   {
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    const auto loopNow = std::chrono::steady_clock::now();
+    if (pipeline.running && pipeline.HasFailed())
+    {
+      std::fprintf(stderr, "[Engine] Audio endpoint failure detected; scheduling pipeline restart.\n");
+      pipeline.Stop();
+      recoveryPending = true;
+      retryDelay = std::chrono::milliseconds(500);
+      nextRetry = loopNow + retryDelay;
+    }
+
     RuntimeControlState control;
     if (LoadRuntimeControlState(controlPath, control))
     {
@@ -497,11 +524,15 @@ int main(int argc, char** argv)
         cfg = newCfg;
         if (!pipeline.Start(cfg))
         {
-          std::fprintf(stderr, "[Engine] Hot-reload failed; waiting for valid settings...\n");
+          std::fprintf(stderr, "[Engine] Hot-reload failed; automatic retry scheduled.\n");
+          recoveryPending = true;
+          retryDelay = std::chrono::milliseconds(500);
+          nextRetry = std::chrono::steady_clock::now() + retryDelay;
         }
         else
         {
           pipeline.SetChannelGainsDb(control.gainsDb);
+          recoveryPending = false;
           std::printf("[Engine] Hot-reload successful.\n");
         }
       }
@@ -511,6 +542,29 @@ int main(int argc, char** argv)
         lastGains = control.gainsDb;
       }
     }
+
+    // Retry unavailable/invalidated endpoints with capped exponential backoff.
+    // This handles HDMI/eARC power cycles and Windows audio-engine restarts without
+    // busy-looping when a cable, TV, or output device remains disconnected.
+    if (recoveryPending && std::chrono::steady_clock::now() >= nextRetry)
+    {
+      std::printf("[Engine] Attempting audio pipeline recovery...\n");
+      if (pipeline.Start(cfg))
+      {
+        pipeline.SetChannelGainsDb(lastGains);
+        recoveryPending = false;
+        retryDelay = std::chrono::milliseconds(500);
+        std::printf("[Engine] Audio pipeline recovered.\n");
+      }
+      else
+      {
+        std::fprintf(stderr, "[Engine] Recovery attempt failed; retrying in %lld ms.\n",
+                     static_cast<long long>(retryDelay.count()));
+        nextRetry = std::chrono::steady_clock::now() + retryDelay;
+        retryDelay = std::min(retryDelay * 2, std::chrono::milliseconds(10000));
+      }
+    }
+
     if (cfg.durationSeconds > 0 &&
         std::chrono::steady_clock::now() - start >= std::chrono::seconds(cfg.durationSeconds))
       break;
