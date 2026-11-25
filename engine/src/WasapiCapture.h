@@ -6,6 +6,7 @@
 #pragma once
 
 #include "ComUtil.h"
+#include "AudioDiagnostics.h"
 #include "RingBuffer.h"
 
 #include <audioclient.h>
@@ -37,11 +38,13 @@ public:
   //                      A short polling fallback supports older loopback implementations.
   //   preferredPeriodHns: requested IAudioClient3 period in 100ns units (default 50000 = 5ms).
   //                       Loopback and fallback paths use the Windows audio-engine period.
-  bool Init(IMMDevice* dev, bool loopback = false, REFERENCE_TIME preferredPeriodHns = 50000);
+  bool Init(IMMDevice* dev, bool loopback = false, REFERENCE_TIME preferredPeriodHns = 50000,
+            AudioDiagnostics* diagnostics = nullptr);
   // Destination ring for captured samples (set before Start, once it can be sized).
   void SetRing(RingBuffer* ring) { ring_ = ring; }
   bool Start();
   void Stop();
+  bool HasFailed() const { return failed_.load(std::memory_order_relaxed); }
 
   const CaptureFormat& Format() const { return fmt_; }
 
@@ -60,4 +63,6 @@ private:
   HANDLE                    stopEvent_ = nullptr;
   std::thread               thread_;
   std::atomic_bool          running_{false};
+  std::atomic_bool          failed_{false};
+  AudioDiagnostics*         diagnostics_ = nullptr;
 };
