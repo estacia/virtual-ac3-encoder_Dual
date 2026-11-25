@@ -2,6 +2,7 @@
 #pragma once
 
 #include "ComUtil.h"
+#include "AudioDiagnostics.h"
 #include "MeterSharedState.h"
 #include "RingBuffer.h"
 #include "WasapiCapture.h"
@@ -30,9 +31,10 @@ public:
   ~WasapiPcmOutput();
 
   bool Init(IMMDevice* dev, RingBuffer* ring, const CaptureFormat& capFmt,
-            uint32_t safeFrames = 1536);
+            uint32_t safeFrames = 1536, AudioDiagnostics* diagnostics = nullptr);
   bool Start();
   void Stop();
+  bool HasFailed() const { return failed_.load(std::memory_order_relaxed); }
 
   // Reuse the GUI's six trims. In PCM mode only FL and FR (indices 0 and 1)
   // apply; the four surround-channel controls are disabled in the UI.
@@ -55,10 +57,12 @@ private:
   AVSampleFormat outSampleFmt_ = AV_SAMPLE_FMT_NONE;
   SwrContext* swr_ = nullptr;
   uint32_t safeFrames_ = 1536;
+  AudioDiagnostics* diagnostics_ = nullptr;
   UINT32 bufferFrames_ = 0;
   HANDLE stopEvent_ = nullptr;
   std::thread thread_;
   std::atomic_bool running_{false};
+  std::atomic_bool failed_{false};
   MeterSharedMemory sharedMem_;
   std::array<std::atomic<float>, 2> gainsLinear_;
   std::vector<uint8_t> inputStaging_;
