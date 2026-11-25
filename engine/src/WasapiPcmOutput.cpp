@@ -65,7 +65,7 @@ WasapiPcmOutput::~WasapiPcmOutput()
 }
 
 bool WasapiPcmOutput::Init(IMMDevice* dev, RingBuffer* ring, const CaptureFormat& capFmt,
-                           uint32_t safeFrames)
+                           uint32_t safeFrames, AudioDiagnostics* diagnostics)
 {
   if (!dev || !ring) {
     std::fprintf(stderr, "[WasapiPcmOutput] invalid output device or ring buffer\n");
@@ -76,6 +76,8 @@ bool WasapiPcmOutput::Init(IMMDevice* dev, RingBuffer* ring, const CaptureFormat
   capFmt_ = capFmt;
   capBytesPerFrame_ = capFmt_.bytesPerFrame();
   safeFrames_ = safeFrames ? safeFrames : 1536;
+  diagnostics_ = diagnostics;
+  failed_.store(false, std::memory_order_relaxed);
   inSampleFmt_ = MapCaptureSampleFormat(capFmt_);
   if (!capBytesPerFrame_ || inSampleFmt_ == AV_SAMPLE_FMT_NONE || capFmt_.sampleRate == 0) {
     std::fprintf(stderr,
@@ -175,6 +177,7 @@ void WasapiPcmOutput::SetChannelGainsDb(const std::array<float, 6>& gainsDb)
 bool WasapiPcmOutput::Start()
 {
   if (running_.exchange(true)) return true;
+  failed_.store(false, std::memory_order_relaxed);
   if (!client_ || !render_ || !stopEvent_ || !swr_) {
     running_.store(false);
     std::fprintf(stderr, "[WasapiPcmOutput] Start requested before successful Init\n");
@@ -270,13 +273,26 @@ void WasapiPcmOutput::ThreadProc()
   const size_t stagingBytes = static_cast<size_t>(bufferFrames_) * capBytesPerFrame_;
   inputStaging_.assign(stagingBytes, 0);
 
+  auto recordError = [&]() {
+    failed_.store(true, std::memory_order_relaxed);
+    if (diagnostics_)
+      diagnostics_->outputWasapiErrors.fetch_add(1, std::memory_order_relaxed);
+  };
+
   while (running_.load(std::memory_order_relaxed)) {
-    if (WaitForSingleObject(stopEvent_, 3) == WAIT_OBJECT_0) break;
+    const DWORD wait = WaitForSingleObject(stopEvent_, 3);
+    if (wait == WAIT_OBJECT_0) break;
+    if (wait == WAIT_FAILED) {
+      std::fprintf(stderr, "[WasapiPcmOutput] stop-event wait failed: %lu\n", GetLastError());
+      recordError();
+      break;
+    }
 
     UINT32 padding = 0;
     HRESULT hr = client_->GetCurrentPadding(&padding);
     if (FAILED(hr)) {
       std::fprintf(stderr, "[WasapiPcmOutput] GetCurrentPadding failed: %s\n", HrStr(hr).c_str());
+      recordError();
       break;
     }
     if (padding >= bufferFrames_) continue;
@@ -287,27 +303,33 @@ void WasapiPcmOutput::ThreadProc()
     hr = render_->GetBuffer(writableFrames, &output);
     if (FAILED(hr) || !output) {
       std::fprintf(stderr, "[WasapiPcmOutput] GetBuffer failed: %s\n", HrStr(hr).c_str());
+      recordError();
       break;
     }
 
     const size_t wantedBytes = static_cast<size_t>(writableFrames) * capBytesPerFrame_;
     std::fill(inputStaging_.begin(), inputStaging_.begin() + wantedBytes, 0);
     const size_t availableBytes = ring_->BytesAvailable();
-    size_t readBytes = std::min(wantedBytes, (availableBytes / capBytesPerFrame_) * capBytesPerFrame_);
-    if (readBytes > 0) {
-      const size_t got = ring_->Read(inputStaging_.data(), readBytes);
-      readBytes = (got / capBytesPerFrame_) * capBytesPerFrame_;
-      if (readBytes < wantedBytes)
-        std::fill(inputStaging_.begin() + readBytes, inputStaging_.begin() + wantedBytes, 0);
-    }
+    const size_t readBytes = std::min(wantedBytes,
+        (availableBytes / capBytesPerFrame_) * capBytesPerFrame_);
+    size_t gotBytes = 0;
+    if (readBytes > 0)
+      gotBytes = ring_->Read(inputStaging_.data(), readBytes);
+
+    const size_t availableFrames = gotBytes / capBytesPerFrame_;
+    if (diagnostics_ && availableFrames < writableFrames)
+      diagnostics_->outputUnderrunFrames.fetch_add(
+          writableFrames - availableFrames, std::memory_order_relaxed);
 
     const uint8_t* inPlanes[1] = { inputStaging_.data() };
     uint8_t* outPlanes[1] = { output };
     const int produced = swr_convert(swr_, outPlanes, static_cast<int>(writableFrames),
                                      inPlanes, static_cast<int>(writableFrames));
-    if (produced < 0) {
+    bool conversionFailed = produced < 0;
+    if (conversionFailed) {
       std::memset(output, 0, static_cast<size_t>(writableFrames) * outBytesPerFrame_);
-      std::fprintf(stderr, "[WasapiPcmOutput] swr_convert failed; outputting silence\n");
+      std::fprintf(stderr, "[WasapiPcmOutput] swr_convert failed; outputting silence and restarting\n");
+      recordError();
     } else {
       if (static_cast<UINT32>(produced) < writableFrames)
         std::memset(output + static_cast<size_t>(produced) * outBytesPerFrame_, 0,
@@ -325,8 +347,9 @@ void WasapiPcmOutput::ThreadProc()
             const float* f = reinterpret_cast<const float*>(output);
             for (int i = 0; i < produced; ++i)
             {
-              float l = std::fabs(f[2 * i]), r = std::fabs(f[2 * i + 1]);
-              if (l > pL) pL = l; if (r > pR) pR = r;
+              const float l = std::fabs(f[2 * i]), r = std::fabs(f[2 * i + 1]);
+              if (l > pL) pL = l;
+              if (r > pR) pR = r;
               sqL += l * l; sqR += r * r;
             }
           }
@@ -335,8 +358,10 @@ void WasapiPcmOutput::ThreadProc()
             const int16_t* s = reinterpret_cast<const int16_t*>(output);
             for (int i = 0; i < produced; ++i)
             {
-              float l = std::fabs(s[2 * i] / 32768.0f), r = std::fabs(s[2 * i + 1] / 32768.0f);
-              if (l > pL) pL = l; if (r > pR) pR = r;
+              const float l = std::fabs(s[2 * i] / 32768.0f);
+              const float r = std::fabs(s[2 * i + 1] / 32768.0f);
+              if (l > pL) pL = l;
+              if (r > pR) pR = r;
               sqL += l * l; sqR += r * r;
             }
           }
@@ -354,6 +379,7 @@ void WasapiPcmOutput::ThreadProc()
     hr = render_->ReleaseBuffer(writableFrames, 0);
     if (FAILED(hr)) {
       std::fprintf(stderr, "[WasapiPcmOutput] ReleaseBuffer failed: %s\n", HrStr(hr).c_str());
+      recordError();
       break;
     }
 
@@ -361,9 +387,18 @@ void WasapiPcmOutput::ThreadProc()
     if ((cycle_++ % 64) == 0) {
       const size_t queuedFrames = ring_->BytesAvailable() / capBytesPerFrame_;
       const size_t target = std::max<size_t>(safeFrames_, static_cast<size_t>(bufferFrames_)) * 2;
-      if (queuedFrames > target)
-        ring_->Discard((queuedFrames - target) * capBytesPerFrame_);
+      if (queuedFrames > target) {
+        const size_t trimFrames = queuedFrames - target;
+        ring_->Discard(trimFrames * capBytesPerFrame_);
+        if (diagnostics_)
+          diagnostics_->driftTrimFrames.fetch_add(trimFrames, std::memory_order_relaxed);
+      }
     }
+
+    if (sharedMem_.IsOpen() && diagnostics_)
+      PublishAudioDiagnostics(sharedMem_.Get(), diagnostics_, ring_->BytesAvailable(),
+                              ring_->Capacity(), capBytesPerFrame_);
+    if (conversionFailed) break;
   }
 
   if (mmcss) AvRevertMmThreadCharacteristics(mmcss);
