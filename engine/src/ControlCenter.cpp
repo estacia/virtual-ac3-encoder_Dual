@@ -1089,6 +1089,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int) {
                         filterFifo, filterTarget,
                         1000.0 * static_cast<double>(filterFifo) / rate,
                         1000.0 * static_cast<double>(filterTarget) / rate);
+                    ImGui::TextDisabled("FFT hop/FIFO figures describe the upmix filter only, not total output latency.");
                 }
             } else {
                 ImGui::TextDisabled("Waiting for engine telemetry (restart the audio engine if needed).");
