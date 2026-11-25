@@ -6,9 +6,9 @@
 #include <windows.h>
 #include "AudioDiagnostics.h"
 
-constexpr const wchar_t* kMeterSharedMemName = L"Local\\VirtualAc3EncoderMetersV2";
+constexpr const wchar_t* kMeterSharedMemName = L"Local\\VirtualAc3EncoderMetersV3";
 constexpr uint32_t kMeterMagic = 0x56414333; // "VAC3"
-constexpr uint32_t kMeterVersion = 2;
+constexpr uint32_t kMeterVersion = 3;
 
 #pragma pack(push, 8)
 struct MeterSharedState
@@ -33,6 +33,10 @@ struct MeterSharedState
   volatile LONG64 ringFillFrames;
   volatile LONG64 ringPeakFrames;
   volatile LONG ringCapacityFrames;
+  volatile LONG surroundFilterState;       // SpdifEncoder::FilterStatus numeric value
+  volatile LONG surroundFilterHopFrames;   // FFT output hop, not end-to-end latency
+  volatile LONG64 surroundFilterFifoFrames;
+  volatile LONG surroundFilterTargetFrames;
 };
 #pragma pack(pop)
 
