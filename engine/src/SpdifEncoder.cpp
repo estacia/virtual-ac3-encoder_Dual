@@ -328,6 +328,8 @@ void SpdifEncoder::Close()
   }
   if (graph_)     avfilter_graph_free(&graph_);
   fsrc_ = fsink_ = nullptr;
+  if (filterInputFrame_) av_frame_free(&filterInputFrame_);
+  filterInputPts_ = 0;
   if (fifo_)      { av_audio_fifo_free(fifo_); fifo_ = nullptr; }
   if (filtFrame_) av_frame_free(&filtFrame_);
   useFilter_ = false;
@@ -429,7 +431,17 @@ bool SpdifEncoder::BuildFilterGraph()
 
   fifo_ = av_audio_fifo_alloc(AV_SAMPLE_FMT_FLTP, codecCtx_->ch_layout.nb_channels, sampleRate_);
   filtFrame_ = av_frame_alloc();
-  if (!fifo_ || !filtFrame_) return false;
+  filterInputFrame_ = av_frame_alloc();
+  if (!fifo_ || !filtFrame_ || !filterInputFrame_) return false;
+
+  filterInputFrame_->format = inSampleFmt_;
+  filterInputFrame_->sample_rate = sampleRate_;
+  filterInputFrame_->nb_samples = framesPerPacket_;
+  rc = av_channel_layout_copy(&filterInputFrame_->ch_layout, &filterInLayout_);
+  if (rc < 0) { LogAv("av_channel_layout_copy(filter input)", rc); return false; }
+  rc = av_frame_get_buffer(filterInputFrame_, 0);
+  if (rc < 0) { LogAv("av_frame_get_buffer(filter input)", rc); return false; }
+  filterInputPts_ = 0;
 
   // Prime the FIFO past the 2048-sample FFT hop of FFmpeg's `surround` filter so
   // both 1536-sample AC3 and 512-sample DTS packets never underrun between FFT hops.
@@ -451,21 +463,23 @@ bool SpdifEncoder::BuildFilterGraph()
 
 bool SpdifEncoder::FeedFilter(const uint8_t* in)
 {
+  if (!in || !filterInputFrame_ || !fsrc_ || !fsink_)
+    return false;
+
   const int inBytes =
       framesPerPacket_ * filterInLayout_.nb_channels * av_get_bytes_per_sample(inSampleFmt_);
 
-  AVFrame* f = av_frame_alloc();
-  if (!f) return false;
-  f->format = inSampleFmt_;
-  av_channel_layout_copy(&f->ch_layout, &filterInLayout_);
-  f->sample_rate = sampleRate_;
-  f->nb_samples = framesPerPacket_;
-  if (av_frame_get_buffer(f, 0) < 0) { av_frame_free(&f); return false; }
-  std::memcpy(f->data[0], in, static_cast<size_t>(inBytes));
+  // Reuse one preallocated frame instead of allocating a new AVFrame and AVBuffer
+  // for every AC-3 packet. KEEP_REF lets the filter graph retain its own reference;
+  // after draining the sink, the next make_writable normally reuses the same buffer.
+  int rc = av_frame_make_writable(filterInputFrame_);
+  if (rc < 0) { LogAv("av_frame_make_writable(filter input)", rc); return false; }
+  std::memcpy(filterInputFrame_->data[0], in, static_cast<size_t>(inBytes));
+  filterInputFrame_->pts = filterInputPts_;
 
-  int rc = av_buffersrc_add_frame(fsrc_, f);
-  av_frame_free(&f);
-  if (rc < 0) { LogAv("av_buffersrc_add_frame", rc); return false; }
+  rc = av_buffersrc_add_frame_flags(fsrc_, filterInputFrame_, AV_BUFFERSRC_FLAG_KEEP_REF);
+  if (rc < 0) { LogAv("av_buffersrc_add_frame_flags", rc); return false; }
+  filterInputPts_ += framesPerPacket_;
   filterInputFramesProcessed_ += static_cast<uint64_t>(framesPerPacket_);
 
   for (;;)

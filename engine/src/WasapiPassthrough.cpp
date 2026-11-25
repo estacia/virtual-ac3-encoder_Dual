@@ -210,47 +210,73 @@ bool WasapiPassthrough::InitExclusive(int rate)
   std::printf("[WasapiPassthrough] %s format accepted (%s WAVEFORMATEXTENSIBLE_IEC61937)\n",
               dtsMode ? "DTS" : "AC3", extended ? "extended" : "plain");
 
-  REFERENCE_TIME defPeriod = 0;
-  HR_FAIL(client_->GetDevicePeriod(&defPeriod, nullptr), "GetDevicePeriod");
+  REFERENCE_TIME defaultPeriod = 0;
+  REFERENCE_TIME minimumExclusivePeriod = 0;
+  HR_FAIL(client_->GetDevicePeriod(&defaultPeriod, &minimumExclusivePeriod), "GetDevicePeriod");
 
-  // One AC3 burst = 1536 carrier frames. Start from a one-burst buffer and let WASAPI's
-  // alignment requirements adjust it.
-  REFERENCE_TIME burstHns =
+  // In exclusive mode, GetDevicePeriod's second value is the minimum endpoint
+  // scheduling period. The default period is for shared-mode engine scheduling;
+  // using it here can unnecessarily enlarge an IEC 61937 output buffer.
+  if (minimumExclusivePeriod <= 0)
+    minimumExclusivePeriod = defaultPeriod;
+
+  // AC-3 requires one complete 1536-sample burst (32 ms at 48 kHz). Request
+  // exactly one burst unless the endpoint's exclusive minimum period is larger.
+  const REFERENCE_TIME burstHns =
       static_cast<REFERENCE_TIME>(10000000.0 * framesPerPacket_ / rate + 0.5);
-  REFERENCE_TIME bufferHns = burstHns > defPeriod ? burstHns : defPeriod;
-  bool needNewClient = false;
+  REFERENCE_TIME bufferHns = std::max(burstHns, minimumExclusivePeriod);
+  auto framesToHns = [rate](UINT32 frames) -> REFERENCE_TIME {
+    return static_cast<REFERENCE_TIME>(10000000.0 * frames / rate + 0.5);
+  };
 
-  do
+  std::printf("[WasapiPassthrough] exclusive periods: shared-default=%.2f ms, "
+              "exclusive-min=%.2f ms, requested=%.2f ms\n",
+              defaultPeriod / 10000.0, minimumExclusivePeriod / 10000.0,
+              bufferHns / 10000.0);
+
+  bool initialized = false;
+  for (unsigned attempt = 0; attempt < 4; ++attempt)
   {
-    if (needNewClient)
-      HR_FAIL(dev_->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
-                             reinterpret_cast<void**>(client_.ReleaseAndGetAddressOf())),
+    if (attempt > 0)
+    {
+      // An Initialize failure can leave the IAudioClient unusable. Always obtain a
+      // fresh client before retrying the aligned buffer size (per WASAPI guidance).
+      client_.Reset();
+      HR_FAIL(dev_->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, &client_),
               "re-Activate IAudioClient");
+    }
 
     hr = client_->Initialize(AUDCLNT_SHAREMODE_EXCLUSIVE,
                              AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_NOPERSIST,
                              bufferHns, bufferHns, &w.FormatExt.Format, nullptr);
-
-    if (hr == AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED)
+    if (SUCCEEDED(hr))
     {
-      UINT32 n = 0;
-      HR_FAIL(client_->GetBufferSize(&n), "GetBufferSize (align)");
-      bufferHns = static_cast<REFERENCE_TIME>(10000.0 * 1000 / rate * n + 0.5);
-      needNewClient = true;
-    }
-    else if (hr == AUDCLNT_E_BUFFER_SIZE_ERROR || hr == AUDCLNT_E_INVALID_DEVICE_PERIOD ||
-             hr == E_OUTOFMEMORY)
-    {
-      bufferHns -= defPeriod;
-      needNewClient = false;
-    }
-    else
-    {
+      initialized = true;
       break;
     }
-  } while (bufferHns >= defPeriod);
 
-  if (FAILED(hr))
+    if (hr != AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED)
+      break;
+
+    UINT32 alignedFrames = 0;
+    const HRESULT sizeHr = client_->GetBufferSize(&alignedFrames);
+    if (FAILED(sizeHr) || alignedFrames == 0)
+    {
+      if (FAILED(sizeHr))
+        hr = sizeHr;
+      break;
+    }
+
+    const REFERENCE_TIME alignedHns = framesToHns(alignedFrames);
+    const REFERENCE_TIME nextBufferHns = std::max(
+        burstHns, std::max(minimumExclusivePeriod, alignedHns));
+    if (nextBufferHns == bufferHns)
+      break;
+
+    bufferHns = nextBufferHns;
+  }
+
+  if (!initialized)
   {
     if (hr == static_cast<HRESULT>(0x8889000A))
     {
@@ -260,7 +286,11 @@ bool WasapiPassthrough::InitExclusive(int rate)
     }
     else
     {
-      std::fprintf(stderr, "[WasapiPassthrough] exclusive Initialize failed: %s\n", HrStr(hr).c_str());
+      std::fprintf(stderr,
+                   "[WasapiPassthrough] exclusive Initialize failed: %s "
+                   "(requested %.2f ms, exclusive minimum %.2f ms)\n",
+                   HrStr(hr).c_str(), bufferHns / 10000.0,
+                   minimumExclusivePeriod / 10000.0);
     }
     return false;
   }
@@ -483,6 +513,9 @@ void WasapiPassthrough::ThreadProc()
 {
   DWORD taskIndex = 0;
   HANDLE mmcss = AvSetMmThreadCharacteristicsW(L"Pro Audio", &taskIndex);
+  if (mmcss && !AvSetMmThreadPriority(mmcss, AVRT_PRIORITY_HIGH))
+    std::fprintf(stderr, "[WasapiPassthrough] AvSetMmThreadPriority(HIGH) failed: %lu\n",
+                 GetLastError());
 
   const uint32_t required = static_cast<uint32_t>(burstsPerCycle_) * framesPerPacket_;
   const uint32_t desired = required + params_.safeFrames;

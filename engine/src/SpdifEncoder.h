@@ -151,6 +151,8 @@ private:
   AVFilterContext* fsink_     = nullptr; // abuffersink
   AVAudioFifo*     fifo_      = nullptr; // accumulates filtered 5.1 fltp samples
   AVFrame*         filtFrame_ = nullptr; // scratch for draining the sink
+  AVFrame*         filterInputFrame_ = nullptr; // reusable, preallocated filter input frame
+  int64_t          filterInputPts_ = 0;
 
   // Dynamic upmix: input is multichannel (e.g. 5.1 cable) but we detect at runtime
   // whether the content is actually stereo (non-FL/FR channels silent) and upmix it.
