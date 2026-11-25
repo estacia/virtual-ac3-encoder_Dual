@@ -3,10 +3,11 @@
 
 #include <cstdint>
 #include <windows.h>
+#include "AudioDiagnostics.h"
 
 constexpr const wchar_t* kMeterSharedMemName = L"Local\\VirtualAc3EncoderMeters";
 constexpr uint32_t kMeterMagic = 0x56414333; // "VAC3"
-constexpr uint32_t kMeterVersion = 1;
+constexpr uint32_t kMeterVersion = 2;
 
 #pragma pack(push, 8)
 struct MeterSharedState
@@ -22,6 +23,15 @@ struct MeterSharedState
   float peakLevels[6];    // Linear 0.0f .. 1.0f (FL, FR, C, LFE, SL, SR)
   float rmsLevels[6];     // Linear RMS energy (FL, FR, C, LFE, SL, SR)
   uint64_t frameCounter;  // Monotonically increasing frame counter
+  volatile LONG64 captureDroppedFrames;
+  volatile LONG64 outputUnderrunFrames;
+  volatile LONG64 outputUnderrunPackets;
+  volatile LONG64 wasapiErrorCount;
+  volatile LONG64 eventTimeoutCount;
+  volatile LONG64 driftTrimFrames;
+  volatile LONG64 ringFillFrames;
+  volatile LONG64 ringPeakFrames;
+  uint32_t ringCapacityFrames;
 };
 #pragma pack(pop)
 
@@ -95,3 +105,36 @@ private:
   HANDLE hMap_ = nullptr;
   MeterSharedState* state_ = nullptr;
 };
+
+inline void PublishAudioDiagnostics(MeterSharedState* state, const AudioDiagnostics* diagnostics,
+                                    size_t ringUsedBytes, size_t ringCapacityBytes,
+                                    size_t bytesPerFrame)
+{
+  if (!state || !diagnostics) return;
+  InterlockedExchange64(&state->captureDroppedFrames,
+      static_cast<LONG64>(diagnostics->captureDroppedFrames.load(std::memory_order_relaxed)));
+  InterlockedExchange64(&state->outputUnderrunFrames,
+      static_cast<LONG64>(diagnostics->outputUnderrunFrames.load(std::memory_order_relaxed)));
+  InterlockedExchange64(&state->outputUnderrunPackets,
+      static_cast<LONG64>(diagnostics->outputUnderrunPackets.load(std::memory_order_relaxed)));
+  InterlockedExchange64(&state->wasapiErrorCount,
+      static_cast<LONG64>(diagnostics->captureWasapiErrors.load(std::memory_order_relaxed) +
+                          diagnostics->outputWasapiErrors.load(std::memory_order_relaxed)));
+  InterlockedExchange64(&state->eventTimeoutCount,
+      static_cast<LONG64>(diagnostics->eventTimeouts.load(std::memory_order_relaxed)));
+  InterlockedExchange64(&state->driftTrimFrames,
+      static_cast<LONG64>(diagnostics->driftTrimFrames.load(std::memory_order_relaxed)));
+
+  const LONG64 fillFrames = bytesPerFrame
+      ? static_cast<LONG64>(ringUsedBytes / bytesPerFrame) : 0;
+  InterlockedExchange64(&state->ringFillFrames, fillFrames);
+  InterlockedExchange(&reinterpret_cast<volatile LONG*>(&state->ringCapacityFrames),
+      bytesPerFrame ? static_cast<LONG>(ringCapacityBytes / bytesPerFrame) : 0);
+  LONG64 peak = InterlockedCompareExchange64(&state->ringPeakFrames, 0, 0);
+  while (fillFrames > peak)
+  {
+    const LONG64 previous = InterlockedCompareExchange64(&state->ringPeakFrames, fillFrames, peak);
+    if (previous == peak) break;
+    peak = previous;
+  }
+}
