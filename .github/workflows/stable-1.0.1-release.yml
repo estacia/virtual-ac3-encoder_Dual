@@ -190,6 +190,9 @@ jobs:
     runs-on: windows-2022
     needs: build-app
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Download release artifacts
         uses: actions/download-artifact@v4
         with:
