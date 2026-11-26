@@ -172,7 +172,7 @@ bool WasapiPassthrough::Init(IMMDevice* dev, RingBuffer* ring, const CaptureForm
                  silenceBytes);
     return false;
   }
-  queueSpaceEvent_ = CreateEventW(nullptr, TRUE, TRUE, nullptr);
+  queueSpaceEvent_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
   if (!queueSpaceEvent_)
   {
     std::fprintf(stderr, "[WasapiPassthrough] failed to create queue-space event (%lu).\\n",
@@ -374,9 +374,8 @@ void WasapiPassthrough::EncoderThreadProc()
     while (running_.load(std::memory_order_relaxed) &&
            queuedBursts_.Size() >= kEncodedQueueCapacity)
     {
-      if (queueSpaceEvent_) ResetEvent(queueSpaceEvent_);
-      // Recheck after ResetEvent to avoid losing a concurrent consumer wakeup.
-      if (queuedBursts_.Size() < kEncodedQueueCapacity) break;
+      // Auto-reset event preserves a pop notification even if it arrives just before
+      // the wait begins; a stale signal simply causes one harmless predicate recheck.
       if (!queueSpaceEvent_ ||
           WaitForSingleObject(queueSpaceEvent_, INFINITE) != WAIT_OBJECT_0)
       {
