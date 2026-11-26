@@ -1059,9 +1059,12 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int) {
         if (ImGui::CollapsingHeader("STREAM DIAGNOSTICS")) {
             const MeterSharedState* state = g_meterMem.IsOpen() ? g_meterMem.Get() : nullptr;
             if (state && state->version >= 4) {
+                // The consumer mapping is opened with FILE_MAP_READ. Interlocked
+                // compare/exchange is a read-modify-write operation and can fault on that
+                // read-only view. All LONG64 telemetry fields are 8-byte aligned by
+                // MeterSharedState's layout; this Windows x64 UI reads them directly.
                 const auto readCounter = [](const volatile LONG64* value) {
-                    return static_cast<unsigned long long>(
-                        InterlockedCompareExchange64(const_cast<volatile LONG64*>(value), 0, 0));
+                    return static_cast<unsigned long long>(*value);
                 };
                 const unsigned long long dropped = readCounter(&state->captureDroppedFrames);
                 const unsigned long long underrunFrames = readCounter(&state->outputUnderrunFrames);
@@ -1071,8 +1074,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int) {
                 const unsigned long long driftTrim = readCounter(&state->driftTrimFrames);
                 const unsigned long long ringFill = readCounter(&state->ringFillFrames);
                 const unsigned long long ringPeak = readCounter(&state->ringPeakFrames);
-                const unsigned int ringCapacity = static_cast<unsigned int>(
-                    InterlockedCompareExchange(const_cast<volatile LONG*>(&state->ringCapacityFrames), 0, 0));
+                const unsigned int ringCapacity =
+                    static_cast<unsigned int>(state->ringCapacityFrames);
                 const double rate = state->sampleRate ? static_cast<double>(state->sampleRate) : 48000.0;
                 ImGui::Text("Capture dropped: %llu frames (%.2f ms)",
                     dropped, 1000.0 * static_cast<double>(dropped) / rate);
@@ -1087,8 +1090,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int) {
                     ringFill, ringCapacity, ringPeak);
 
                 const auto readLong = [](const volatile LONG* value) {
-                    return InterlockedCompareExchange(
-                        const_cast<volatile LONG*>(value), 0, 0);
+                    return *value;
                 };
                 const unsigned int queueBursts = static_cast<unsigned int>(
                     readLong(&state->encoderQueueBursts));
@@ -1115,13 +1117,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int) {
                 ImGui::Text("Encode time: last %llu / max %llu us | Render event: last %llu / max %llu us",
                     encodeLastUs, encodeMaxUs, renderLastUs, renderMaxUs);
 
-                const LONG filterState = InterlockedCompareExchange(
-                    const_cast<volatile LONG*>(&state->surroundFilterState), 0, 0);
-                const LONG filterHop = InterlockedCompareExchange(
-                    const_cast<volatile LONG*>(&state->surroundFilterHopFrames), 0, 0);
+                const LONG filterState = state->surroundFilterState;
+                const LONG filterHop = state->surroundFilterHopFrames;
                 const unsigned long long filterFifo = readCounter(&state->surroundFilterFifoFrames);
-                const LONG filterTarget = InterlockedCompareExchange(
-                    const_cast<volatile LONG*>(&state->surroundFilterTargetFrames), 0, 0);
+                const LONG filterTarget = state->surroundFilterTargetFrames;
                 const char* filterLabel = "Disabled";
                 switch (filterState) {
                     case 1: filterLabel = "Stereo FFT upmix"; break;
