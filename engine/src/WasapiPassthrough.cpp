@@ -229,21 +229,46 @@ bool WasapiPassthrough::InitExclusive(int rate)
   };
   const UINT32 requestedFrames = std::clamp<UINT32>(
       params_.renderPeriodFrames, 64u, static_cast<UINT32>(std::max(64, framesPerPacket_)));
-  const REFERENCE_TIME preferredHns = std::max(minimumExclusivePeriod, framesToHns(requestedFrames));
-  const REFERENCE_TIME fullBurstHns = std::max(minimumExclusivePeriod, burstHns);
-  const REFERENCE_TIME candidates[2] = { preferredHns, fullBurstHns };
+
+  // Start with a deliberately small render period, then step up through conservative
+  // fallbacks if the endpoint rejects it. AC-3 still emits complete 1536-frame bursts;
+  // the smaller periods only control how often the event-driven render thread is called.
+  const UINT32 candidateFrameTargets[] = {
+      requestedFrames,
+      std::max<UINT32>(requestedFrames, 256u),
+      std::max<UINT32>(requestedFrames, 512u),
+      std::max<UINT32>(requestedFrames, 1024u),
+      static_cast<UINT32>(framesPerPacket_)
+  };
+  UINT32 candidateFrames[sizeof(candidateFrameTargets) / sizeof(candidateFrameTargets[0])] = {};
+  REFERENCE_TIME candidates[sizeof(candidateFrameTargets) / sizeof(candidateFrameTargets[0])] = {};
+  size_t candidateCount = 0;
+  for (const UINT32 targetFrames : candidateFrameTargets)
+  {
+    const UINT32 boundedFrames =
+        std::min(targetFrames, static_cast<UINT32>(framesPerPacket_));
+    const REFERENCE_TIME candidateHns =
+        std::max(minimumExclusivePeriod, framesToHns(boundedFrames));
+    // GetDevicePeriod() can be larger than every requested tier. Avoid retrying an
+    // identical period while preserving the smallest period the endpoint allows.
+    if (candidateCount == 0 || candidateHns > candidates[candidateCount - 1])
+    {
+      candidateFrames[candidateCount] = boundedFrames;
+      candidates[candidateCount] = candidateHns;
+      ++candidateCount;
+    }
+  }
 
   std::printf("[WasapiPassthrough] exclusive periods: shared-default=%.2f ms, minimum=%.2f ms, "
-              "preferred=%.2f ms, full-burst=%.2f ms\n",
+              "requested=%u frames (~%.2f ms), fallback tiers=%zu\n",
               defaultPeriod / 10000.0, minimumExclusivePeriod / 10000.0,
-              preferredHns / 10000.0, fullBurstHns / 10000.0);
+              requestedFrames, 1000.0 * requestedFrames / rate, candidateCount);
 
   bool initialized = false;
-  bool fullBurstFallback = false;
-  REFERENCE_TIME acceptedHns = preferredHns;
-  for (int candidate = 0; candidate < 2 && !initialized; ++candidate)
+  size_t acceptedCandidate = candidateCount;
+  REFERENCE_TIME acceptedHns = candidates[0];
+  for (size_t candidate = 0; candidate < candidateCount && !initialized; ++candidate)
   {
-    if (candidate == 1 && candidates[1] == candidates[0]) break;
     REFERENCE_TIME bufferHns = candidates[candidate];
     for (unsigned attempt = 0; attempt < 4; ++attempt)
     {
@@ -259,8 +284,8 @@ bool WasapiPassthrough::InitExclusive(int rate)
       if (SUCCEEDED(hr))
       {
         initialized = true;
+        acceptedCandidate = candidate;
         acceptedHns = bufferHns;
-        fullBurstFallback = candidate == 1;
         break;
       }
       if (hr != AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED) break;
@@ -295,13 +320,14 @@ bool WasapiPassthrough::InitExclusive(int rate)
   HR_FAIL(client_->SetEventHandle(dataEvent_), "SetEventHandle");
   HR_FAIL(client_->GetService(__uuidof(IAudioRenderClient), &render_), "GetService(IAudioRenderClient)");
 
-  std::printf("[WasapiPassthrough] render buffer=%u frames (~%.2f ms); %s burst=%d frames spans %.2f cycles%s; "
-              "accepted Initialize=%.2f ms\n",
+  std::printf("[WasapiPassthrough] render buffer=%u frames (~%.2f ms); %s burst=%d frames spans %.2f cycles; "
+              "selected tier=%zu/%zu (%u-frame target), accepted Initialize=%.2f ms%s\n",
               bufferFrames_, 1000.0 * bufferFrames_ / rate,
               dtsMode ? "DTS" : "AC-3", framesPerPacket_,
               static_cast<double>(framesPerPacket_) / bufferFrames_,
-              fullBurstFallback ? " (full-burst fallback)" : "",
-              acceptedHns / 10000.0);
+              acceptedCandidate + 1, candidateCount, candidateFrames[acceptedCandidate],
+              acceptedHns / 10000.0,
+              acceptedCandidate == 0 ? " (128-frame low-latency target)" : " (fallback)");
   return true;
 }
 
