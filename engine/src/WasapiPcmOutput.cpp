@@ -208,7 +208,12 @@ bool WasapiPcmOutput::Start()
 
 void WasapiPcmOutput::Stop()
 {
-  running_.store(false, std::memory_order_relaxed);
+  // Stop and join the render worker before mutating its shared meter state.
+  running_.store(false, std::memory_order_release);
+  if (stopEvent_) SetEvent(stopEvent_);
+  if (thread_.joinable()) thread_.join();
+  if (client_) client_->Stop();
+
   if (sharedMem_.IsOpen())
   {
     MeterSharedState* ms = sharedMem_.Get();
@@ -218,12 +223,8 @@ void WasapiPcmOutput::Stop()
       for (int i = 0; i < 6; ++i) { ms->peakLevels[i] = 0.0f; ms->rmsLevels[i] = 0.0f; }
     }
   }
-  if (stopEvent_) SetEvent(stopEvent_);
-  if (thread_.joinable()) thread_.join();
-  if (client_) {
-    client_->Stop();
-    client_.Reset();
-  }
+
+  client_.Reset();
   render_.Reset();
   dev_.Reset();
   if (stopEvent_) { CloseHandle(stopEvent_); stopEvent_ = nullptr; }
