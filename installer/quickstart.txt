@@ -23,6 +23,18 @@ Requirements
 
 2. An optical (S-PDIF / Toslink) output connected to your receiver's optical input.
 
+Optional: included WaveRT Virtual 5.1 driver
+------------------------------------------------
+The release bundles the updated x64 WaveRT driver under driver\\x64\\Release\\package.
+To install it, open an elevated PowerShell in the application folder:
+  .\\scripts\\install-driver.ps1 -EnableTestSigning
+Reboot when prompted, then run:
+  .\\scripts\\install-driver.ps1
+
+This is a test-signed driver. Secure Boot may need to be disabled and Windows test signing
+enabled for it to load. Do not change these security settings unless you understand and
+accept the implications. VB-CABLE remains an alternative virtual audio endpoint.
+
 How it runs
 -----------
 Dolby Control Center auto-starts minimized to the system tray at logon and supervises
