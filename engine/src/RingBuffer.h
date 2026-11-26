@@ -121,7 +121,8 @@ public:
   }
 
   // Consumer: advance by complete frames only.
-  void Discard(size_t n)
+  // Consumer: advance by complete frames only and return the bytes actually discarded.
+  size_t Discard(size_t n)
   {
     const size_t requestedFrames = n / frameBytes_;
     const uint64_t head = head_.load(std::memory_order_acquire);
@@ -129,6 +130,7 @@ public:
     const size_t frames = std::min(requestedFrames, static_cast<size_t>(head - tail));
     if (frames)
       tail_.store(tail + frames, std::memory_order_release);
+    return frames * frameBytes_;
   }
 
   size_t Read(void* dst, size_t n)
