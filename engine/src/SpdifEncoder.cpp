@@ -115,7 +115,10 @@ void SpdifEncoder::ApplyTimeDomainUpmix()
     sl[i] = side * kMinus3dB;
     sr[i] = -side * kMinus3dB;
     lfeFilterState_ += alpha * (mid - lfeFilterState_);
-    lfe[i] = lfeFilterState_;
+    // AC-3 LFE playback conventionally receives +10 dB bass-management gain.
+    // Encode the derived program signal 10 dB below the main-channel reference.
+    constexpr float kLfeProgramGain = 0.31622777f; // 10^(-10/20)
+    lfe[i] = lfeFilterState_ * kLfeProgramGain;
   }
 }
 
