@@ -753,3 +753,107 @@ TEST_CASE("upmix=frontstage: 3.1 sends to Center while keeping rear surrounds qu
   // Rear surrounds must be quiet (sur_out=0)
   CHECK(0.5 * (rms[4] + rms[5]) < 0.005);
 }
+
+
+TEST_CASE("time-domain matrix: anti-phase stereo steers to rear channels without FFT")
+{
+  const std::vector<double> rms = AntiPhaseSurroundRms(SpdifEncoder::Upmix::TimeDomain);
+  REQUIRE(rms.size() >= 6);
+  CHECK(rms[4] > 0.05);
+  CHECK(rms[5] > 0.05);
+  CHECK(rms[2] < 0.01); // anti-phase input has no center component
+
+  SpdifEncoder::Params p;
+  p.sampleRate = 48000;
+  p.inSampleFmt = AV_SAMPLE_FMT_FLT;
+  p.upmix = SpdifEncoder::Upmix::TimeDomain;
+  av_channel_layout_default(&p.inLayout, 2);
+  SpdifEncoder enc;
+  const bool ok = enc.Init(p);
+  av_channel_layout_uninit(&p.inLayout);
+  REQUIRE(ok);
+  CHECK(enc.GetFilterStatus() == SpdifEncoder::FilterStatus::Disabled);
+  CHECK(enc.FilterHopFrames() == 0);
+  CHECK(enc.FilterFifoFrames() == 0);
+  CHECK(enc.FilterProcessedFrames() == 0);
+}
+
+TEST_CASE("time-domain matrix: LFE is low-passed and calibrated below main channels")
+{
+  SpdifEncoder::Params p;
+  p.sampleRate = 48000;
+  p.inSampleFmt = AV_SAMPLE_FMT_FLT;
+  p.upmix = SpdifEncoder::Upmix::TimeDomain;
+  av_channel_layout_default(&p.inLayout, 2);
+  SpdifEncoder enc;
+  const bool ok = enc.Init(p);
+  av_channel_layout_uninit(&p.inLayout);
+  REQUIRE(ok);
+
+  const int fpp = enc.FramesPerPacket();
+  std::vector<float> input(static_cast<size_t>(fpp) * 2);
+  std::vector<uint8_t> burst(SpdifEncoder::kMaxBytesPerPacket);
+  std::vector<uint8_t> stream;
+  int64_t time = 0;
+  for (int packet = 0; packet < 24; ++packet)
+  {
+    for (int i = 0; i < fpp; ++i)
+    {
+      const float sample = 0.25f * static_cast<float>(
+          std::sin(2.0 * kPi * 80.0 * static_cast<double>(time + i) / 48000.0));
+      input[2 * i] = sample;
+      input[2 * i + 1] = sample;
+    }
+    time += fpp;
+    const int bytes = enc.EncodePacket(reinterpret_cast<const uint8_t*>(input.data()),
+                                       burst.data(), static_cast<int>(burst.size()));
+    if (bytes > 0) stream.insert(stream.end(), burst.data(), burst.data() + bytes);
+  }
+  REQUIRE(stream.size() > static_cast<size_t>(6144) * 4);
+  const std::vector<double> rms = DecodeSpdifAc3Rms(stream.data(), static_cast<int>(stream.size()));
+  REQUIRE(rms.size() >= 6);
+  const double frontRms = 0.5 * (rms[0] + rms[1]);
+  CHECK(frontRms > 0.02);
+  CHECK(rms[3] > 0.005);
+  CHECK(rms[3] < frontRms * 0.45);
+}
+
+TEST_CASE("time-domain matrix: discrete native 5.1 channels bypass stereo matrix")
+{
+  SpdifEncoder::Params p;
+  p.sampleRate = 48000;
+  p.inSampleFmt = AV_SAMPLE_FMT_FLT;
+  p.upmix = SpdifEncoder::Upmix::TimeDomain;
+  AVChannelLayout layout = AV_CHANNEL_LAYOUT_5POINT1_BACK;
+  av_channel_layout_copy(&p.inLayout, &layout);
+  SpdifEncoder enc;
+  const bool ok = enc.Init(p);
+  av_channel_layout_uninit(&p.inLayout);
+  REQUIRE(ok);
+
+  const int fpp = enc.FramesPerPacket();
+  std::vector<float> input(static_cast<size_t>(fpp) * 6, 0.0f);
+  std::vector<uint8_t> burst(SpdifEncoder::kMaxBytesPerPacket);
+  std::vector<uint8_t> stream;
+  for (int packet = 0; packet < 24; ++packet)
+  {
+    for (int i = 0; i < fpp; ++i)
+    {
+      const double t = static_cast<double>(packet * fpp + i) / 48000.0;
+      input[static_cast<size_t>(i) * 6 + 0] = 0.20f * static_cast<float>(std::sin(2.0 * kPi * 440.0 * t));
+      input[static_cast<size_t>(i) * 6 + 1] = 0.19f * static_cast<float>(std::sin(2.0 * kPi * 554.0 * t));
+      input[static_cast<size_t>(i) * 6 + 2] = 0.18f * static_cast<float>(std::sin(2.0 * kPi * 660.0 * t));
+      input[static_cast<size_t>(i) * 6 + 3] = 0.10f * static_cast<float>(std::sin(2.0 * kPi * 100.0 * t));
+      input[static_cast<size_t>(i) * 6 + 4] = 0.17f * static_cast<float>(std::sin(2.0 * kPi * 330.0 * t));
+      input[static_cast<size_t>(i) * 6 + 5] = 0.16f * static_cast<float>(std::sin(2.0 * kPi * 392.0 * t));
+    }
+    const int bytes = enc.EncodePacket(reinterpret_cast<const uint8_t*>(input.data()),
+                                       burst.data(), static_cast<int>(burst.size()));
+    if (bytes > 0) stream.insert(stream.end(), burst.data(), burst.data() + bytes);
+  }
+  REQUIRE(stream.size() > static_cast<size_t>(6144) * 4);
+  const std::vector<double> rms = DecodeSpdifAc3Rms(stream.data(), static_cast<int>(stream.size()));
+  REQUIRE(rms.size() >= 6);
+  for (int channel = 0; channel < 6; ++channel)
+    CHECK(rms[static_cast<size_t>(channel)] > 0.01);
+}
