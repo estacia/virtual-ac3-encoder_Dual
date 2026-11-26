@@ -89,7 +89,7 @@ private:
 
   HANDLE dataEvent_ = nullptr;
   HANDLE stopEvent_ = nullptr;
-  HANDLE queueSpaceEvent_ = nullptr;
+  HANDLE queueSpaceSemaphore_ = nullptr;
   std::thread thread_;        // short-period WASAPI render thread
   std::thread encoderThread_; // PCM -> AC-3/DTS -> IEC 61937 worker
   std::atomic_bool running_{false};
