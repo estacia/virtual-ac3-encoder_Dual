@@ -37,6 +37,7 @@ Source: "{#SourceDir}\README.md";         DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\LICENSE";           DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\NOTICE.md";         DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\scripts\*";         DestDir: "{app}\scripts"; Flags: ignoreversion recursesubdirs
+Source: "{#SourceDir}\driver\*";          DestDir: "{app}\driver"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
 ; Don't overwrite the user's settings on upgrade:
 Source: "{#SourceDir}\virtual-ac3-encoder.conf"; DestDir: "{app}"; Flags: onlyifdoesntexist
 
