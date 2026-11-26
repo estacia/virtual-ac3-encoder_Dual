@@ -1,0 +1,121 @@
+name: One-time v0.2.9-beta Release
+
+on:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: beta-release-0.2.9
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: ${{ github.event_name == 'push' && contains(github.event.head_commit.message, '[skip-release]') }}
+    name: Build, test and publish v0.2.9-beta
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify tag does not already exist
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view v0.2.9-beta *> $null
+          if ($LASTEXITCODE -eq 0) { throw "Release v0.2.9-beta already exists; refusing to overwrite it." }
+          $global:LASTEXITCODE = 0
+
+      - name: Cache FFmpeg dev libs
+        id: ffcache
+        uses: actions/cache@v4
+        with:
+          path: third_party/ffmpeg
+          key: ffmpeg-${{ runner.os }}-${{ hashFiles('scripts/fetch-ffmpeg.ps1') }}
+
+      - name: Fetch FFmpeg
+        if: steps.ffcache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: ./scripts/fetch-ffmpeg.ps1
+
+      - name: Configure + build (Release)
+        shell: pwsh
+        run: |
+          cmake -S engine -B engine/build -G "Visual Studio 17 2022" -A x64 "-DVAC3_VERSION=0.2.9-beta"
+          cmake --build engine/build --config Release
+
+      - name: Unit tests (ctest)
+        run: ctest --test-dir engine/build -C Release --output-on-failure
+
+      - name: Assemble dist staging
+        shell: pwsh
+        run: |
+          $d = "dist"
+          New-Item -ItemType Directory -Force -Path "$d/scripts" | Out-Null
+          Copy-Item engine/build/Release/*.exe $d
+          Copy-Item engine/build/Release/*.dll $d
+          foreach ($x in 'VCRUNTIME140.dll','VCRUNTIME140_1.dll','MSVCP140.dll') {
+            Copy-Item "$env:WINDIR/System32/$x" $d -Force
+          }
+          Copy-Item scripts/*.ps1 "$d/scripts"
+          Copy-Item README.md,LICENSE,NOTICE.md,CLAUDE.md $d
+          Copy-Item installer/supervisor.vbs,installer/stop-engine.ps1,installer/app.ico $d
+          Copy-Item installer/quickstart.txt "$d/QUICKSTART.txt"
+          Copy-Item installer/default.conf "$d/virtual-ac3-encoder.conf"
+
+      - name: Create portable zip
+        shell: pwsh
+        run: Compress-Archive -Path dist/* -DestinationPath "virtual-ac3-encoder-0.2.9-beta-win64.zip" -Force
+
+      - name: Build installer (Inno Setup)
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\ISCC.exe"
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup -y --no-progress | Out-Null
+            $cmd = Get-Command ISCC.exe -ErrorAction SilentlyContinue
+            $iscc = if ($cmd) { $cmd.Source } else { "$env:ProgramData\chocolatey\bin\ISCC.exe" }
+          }
+          $src = (Resolve-Path dist).Path
+          & $iscc "/DAppVersion=0.2.9-beta" "/DSourceDir=$src" installer/virtual-ac3-encoder.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed ($LASTEXITCODE)" }
+
+      - name: Upload artifacts (zip + installer)
+        uses: actions/upload-artifact@v4
+        with:
+          name: virtual-ac3-encoder-0.2.9-beta
+          path: |
+            virtual-ac3-encoder-0.2.9-beta-win64.zip
+            installer/Output/virtual-ac3-encoder-setup-0.2.9-beta.exe
+          if-no-files-found: error
+
+      - name: Publish GitHub prerelease
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ver = "0.2.9-beta"
+          $tag = "v$ver"
+          $zip = "virtual-ac3-encoder-$ver-win64.zip"
+          $exe = "installer/Output/virtual-ac3-encoder-setup-$ver.exe"
+          if (-not (Test-Path $zip)) { throw "Portable archive missing: $zip" }
+          if (-not (Test-Path $exe)) { throw "Installer missing: $exe" }
+          $notes = @"
+          **v0.2.9-beta — audio pipeline stability and diagnostics**
+
+          - Replaced the mutex-protected encoded-burst queue with a bounded lock-free SPSC queue and counting-semaphore slot ownership. The render thread no longer waits on an encoder-owned queue mutex.
+          - Corrected in-flight AC-3/DTS frame accounting: pending frames remain counted until their samples are submitted to WASAPI.
+          - Added live queue depth, active-burst remainder, actual WASAPI buffer size, encoder time and render-event time diagnostics.
+          - Added SPSC FIFO, capacity, reset and concurrent-transfer regression tests.
+
+          **Compatibility kept unchanged:** AC-3 5.1 encoding and its 1536-sample frame size, Extreme latency settings, 12-burst queue reserve, ring-buffer capacity, 256-frame WASAPI period request/fallback, MMCSS priorities and loopback capture compatibility behavior.
+
+          No audio driver or kernel component was changed. Hardware end-to-end latency and long-duration soak testing remain user-system validation items.
+          "@
+          gh release create $tag --title "v$ver" --notes $notes --prerelease $zip $exe
+          if ($LASTEXITCODE -ne 0) { throw "GitHub release publishing failed ($LASTEXITCODE)" }
+          gh release view $tag --json tagName,isPrerelease,assets
+          if ($LASTEXITCODE -ne 0) { throw "Could not verify the published release ($LASTEXITCODE)" }
