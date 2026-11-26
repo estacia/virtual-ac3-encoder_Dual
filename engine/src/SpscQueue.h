@@ -1,6 +1,7 @@
 // SpscQueue.h — bounded single-producer / single-consumer lock-free queue.
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstddef>
@@ -45,7 +46,7 @@ public:
     // Read first: the consumer cannot advance beyond a write index it has observed.
     const uint64_t read = read_.load(std::memory_order_acquire);
     const uint64_t write = write_.load(std::memory_order_acquire);
-    return static_cast<size_t>(write - read);
+    return static_cast<size_t>(std::min<uint64_t>(write - read, Capacity));
   }
 
   static constexpr size_t CapacityValue() { return Capacity; }
