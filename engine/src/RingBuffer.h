@@ -120,7 +120,6 @@ public:
     return totalBytes;
   }
 
-  // Consumer: advance by complete frames only.
   // Consumer: advance by complete frames only and return the bytes actually discarded.
   size_t Discard(size_t n)
   {
