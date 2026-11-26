@@ -111,6 +111,17 @@ TEST_CASE("WaitForData wakes after producer publishes a complete frame")
   producer.join();
 }
 
+TEST_CASE("discard reports actual complete bytes removed")
+{
+  RingBuffer rb(64, 4);
+  uint8_t input[20] = {};
+  CHECK(rb.Write(input, sizeof(input)) == sizeof(input));
+  CHECK(rb.Discard(11) == 8); // two complete 4-byte frames
+  CHECK(rb.BytesAvailable() == 12);
+  CHECK(rb.Discard(100) == 12); // clamp to the complete frames remaining
+  CHECK(rb.BytesAvailable() == 0);
+}
+
 TEST_CASE("SPSC concurrent transfer preserves every byte in order")
 {
   // Producer sends a known sequence (wrapping mod 256); consumer reads it back.
