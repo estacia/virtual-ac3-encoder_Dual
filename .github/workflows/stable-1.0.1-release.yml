@@ -157,6 +157,7 @@ jobs:
           $src = (Resolve-Path dist).Path
           & $iscc "/DAppVersion=1.0.1" "/DSourceDir=$src" installer/virtual-ac3-encoder.iss
           if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed ($LASTEXITCODE)" }
+          Copy-Item installer/Output/virtual-ac3-encoder-setup-1.0.1.exe .
 
       - name: Generate SHA-256 checksums
         shell: pwsh
@@ -179,7 +180,7 @@ jobs:
           path: |
             virtual-ac3-encoder-1.0.1-win64.zip
             virtual-ac3-encoder-driver-1.0.1-win64.zip
-            installer/Output/virtual-ac3-encoder-setup-1.0.1.exe
+            virtual-ac3-encoder-setup-1.0.1.exe
             SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 30
