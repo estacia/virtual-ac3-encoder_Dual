@@ -387,6 +387,29 @@ void WasapiPassthrough::EncoderThreadProc()
       }
       encoderPrimed = true;
     }
+    // This worker is the only RingBuffer consumer. Apply render-thread trim requests
+    // here, retaining one complete codec packet so drift correction cannot starve encoding.
+    const uint64_t trimRequested = pendingTrimFrames_.exchange(0, std::memory_order_acq_rel);
+    if (trimRequested != 0)
+    {
+      const size_t availableFrames = ring_->BytesAvailable() / capBytesPerFrame_;
+      const size_t keepFrames = static_cast<size_t>(framesPerPacket_);
+      const size_t droppableFrames = availableFrames > keepFrames
+          ? availableFrames - keepFrames : 0;
+      const size_t trimNow = static_cast<size_t>(
+          std::min<uint64_t>(trimRequested, static_cast<uint64_t>(droppableFrames)));
+      size_t discardedFrames = 0;
+      if (trimNow != 0)
+      {
+        const size_t discardedBytes = ring_->Discard(trimNow * capBytesPerFrame_);
+        discardedFrames = discardedBytes / capBytesPerFrame_;
+        if (diagnostics_ && discardedFrames != 0)
+          diagnostics_->driftTrimFrames.fetch_add(discardedFrames, std::memory_order_relaxed);
+      }
+      if (trimRequested > discardedFrames)
+        pendingTrimFrames_.fetch_add(trimRequested - discardedFrames, std::memory_order_release);
+    }
+
     available = ring_->BytesAvailable();
     if (available < packetBytes)
     {
@@ -454,6 +477,7 @@ bool WasapiPassthrough::Start()
   burstOffsetFrames_ = static_cast<uint32_t>(framesPerPacket_);
   currentBurstHasAudio_ = false;
   encoderPendingFrames_.store(0, std::memory_order_relaxed);
+  pendingTrimFrames_.store(0, std::memory_order_relaxed);
   {
     std::lock_guard<std::mutex> lock(queueMutex_);
     queueReadIndex_ = queueWriteIndex_ = queueCount_ = 0;
@@ -545,8 +569,18 @@ bool WasapiPassthrough::Start()
 
 void WasapiPassthrough::Stop()
 {
-  running_.store(false, std::memory_order_relaxed);
-  primed_ = false;
+  // Stop workers before touching render-thread-owned state or shared meter data.
+  // In particular, primed_ is render-thread-owned and must not be reset concurrently.
+  running_.store(false, std::memory_order_release);
+  if (stopEvent_) SetEvent(stopEvent_);
+  queueCv_.notify_all();
+  if (ring_) ring_->WakeWaiters();
+
+  if (thread_.joinable()) thread_.join();
+  if (encoderThread_.joinable()) encoderThread_.join();
+  if (client_) client_->Stop();
+
+  // The render worker is joined, so these writes cannot race its meter updates.
   if (sharedMem_.IsOpen())
   {
     MeterSharedState* ms = sharedMem_.Get();
@@ -560,12 +594,7 @@ void WasapiPassthrough::Stop()
       for (int i = 0; i < 6; ++i) { ms->peakLevels[i] = 0.0f; ms->rmsLevels[i] = 0.0f; }
     }
   }
-  if (stopEvent_) SetEvent(stopEvent_);
-  queueCv_.notify_all();
-  if (ring_) ring_->WakeWaiters();
-  if (thread_.joinable()) thread_.join();
-  if (encoderThread_.joinable()) encoderThread_.join();
-  if (client_) client_->Stop();
+
   client_.Reset();
   render_.Reset();
   dev_.Reset();
@@ -658,9 +687,8 @@ void WasapiPassthrough::ThreadProc()
           const uint32_t excess = minAvail_ - (desired + hysteresis / 2);
           const uint32_t maxTrim = std::max<uint32_t>(1, framesPerPacket_ / 8);
           const uint32_t trim = std::min(excess, maxTrim);
-          ring_->Discard(static_cast<size_t>(trim) * capBytesPerFrame_);
-          if (diagnostics_ && trim)
-            diagnostics_->driftTrimFrames.fetch_add(trim, std::memory_order_relaxed);
+          // Keep RingBuffer single-consumer: defer the discard to EncoderThreadProc().
+          pendingTrimFrames_.fetch_add(trim, std::memory_order_release);
         }
         minAvail_ = 0xFFFFFFFFu;
         driftFrameAccumulator_ %= capFmt_.sampleRate;

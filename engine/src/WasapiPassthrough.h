@@ -1,11 +1,10 @@
 // WasapiPassthrough.h
 //
-// The output / master-clock side of the engine. Opens the optical endpoint in EXCLUSIVE,
-// event-driven IEC 61937 (Dolby Digital) mode and, on each render event, pulls PCM from the
-// shared RingBuffer, encodes it to an AC3 / IEC 61937 burst (SpdifEncoder) and writes it to
-// the device. Clock drift between the capture clock and this output clock is absorbed by the
-// ring buffer and corrected SoundPusher-style: every ~64 cycles, excess buffered frames are
-// trimmed to bound latency; underruns emit AC3 silence so the receiver stays locked.
+// Opens the optical endpoint in EXCLUSIVE, event-driven IEC 61937 mode. A dedicated encoder
+// worker is the sole RingBuffer consumer and produces complete AC3/DTS bursts. The render
+// thread only dequeues bursts and copies their carrier frames to WASAPI. Clock-drift trimming
+// is requested by the render thread and applied by the encoder worker to preserve SPSC access.
+// Underruns emit a valid encoded silence burst so the receiver stays locked.
 #pragma once
 
 #include "ComUtil.h"
@@ -20,6 +19,7 @@
 #include <mmdeviceapi.h>
 
 #include <atomic>
+#include <cstdint>
 #include <condition_variable>
 #include <mutex>
 #include <thread>
@@ -100,6 +100,9 @@ private:
   size_t queueWriteIndex_ = 0;
   size_t queueCount_ = 0;
   std::atomic<uint32_t> encoderPendingFrames_{0};
+  // The render thread only requests trims; the encoder worker applies them as the sole
+  // RingBuffer consumer. This preserves the ring's single-consumer contract.
+  std::atomic<uint64_t> pendingTrimFrames_{0};
 
   std::atomic<uint32_t> filterStateSnapshot_{0};
   std::atomic<uint32_t> filterHopSnapshot_{0};
