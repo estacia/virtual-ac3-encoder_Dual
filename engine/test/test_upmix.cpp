@@ -158,12 +158,12 @@ std::vector<double> AntiPhaseSurroundRms(SpdifEncoder::Upmix mode)
 }
 
 
-std::vector<double> EncodeDualStereoRms(bool input51, bool native51)
+std::vector<double> EncodeUpmixRms(SpdifEncoder::Upmix mode, bool input51, bool native51)
 {
   SpdifEncoder::Params p;
   p.sampleRate = 48000;
   p.inSampleFmt = AV_SAMPLE_FMT_FLT;
-  p.upmix = SpdifEncoder::Upmix::DualStereo;
+  p.upmix = mode;
   if (input51)
   {
     AVChannelLayout lay51 = AV_CHANNEL_LAYOUT_5POINT1_BACK;
@@ -211,7 +211,7 @@ std::vector<double> EncodeDualStereoRms(bool input51, bool native51)
 
 TEST_CASE("Dual Stereo Copy: 2-channel stereo is copied to matching rear channels")
 {
-  const std::vector<double> rms = EncodeDualStereoRms(false, false);
+  const std::vector<double> rms = EncodeUpmixRms(SpdifEncoder::Upmix::DualStereo, false, false);
   REQUIRE(rms.size() >= 6);
   CHECK(rms[0] > 0.03);
   CHECK(rms[1] > 0.03);
@@ -227,7 +227,7 @@ TEST_CASE("Dual Stereo Copy: 2-channel stereo is copied to matching rear channel
 
 TEST_CASE("Dual Stereo Copy: stereo padded into a 5.1 endpoint is copied to rears")
 {
-  const std::vector<double> rms = EncodeDualStereoRms(true, false);
+  const std::vector<double> rms = EncodeUpmixRms(SpdifEncoder::Upmix::DualStereo, true, false);
   REQUIRE(rms.size() >= 6);
   CHECK(rms[0] > 0.03);
   CHECK(rms[1] > 0.03);
@@ -243,7 +243,7 @@ TEST_CASE("Dual Stereo Copy: stereo padded into a 5.1 endpoint is copied to rear
 
 TEST_CASE("Dual Stereo Copy: native discrete 5.1 channels remain untouched")
 {
-  const std::vector<double> rms = EncodeDualStereoRms(true, true);
+  const std::vector<double> rms = EncodeUpmixRms(SpdifEncoder::Upmix::DualStereo, true, true);
   REQUIRE(rms.size() >= 6);
   for (int c = 0; c < 6; ++c)
     CHECK(rms[c] > 0.02);
@@ -257,6 +257,54 @@ TEST_CASE("time-domain upmix steers anti-phase stereo without FFT buffering")
   CHECK(rms[5] > 0.05);
   CHECK(rms[2] < 0.02);
   CHECK(rms[3] < 0.02);
+}
+
+TEST_CASE("Time-domain Native 5.1 mode still matrix-upmixes true 2-channel stereo")
+{
+  const std::vector<double> rms =
+      AntiPhaseSurroundRms(SpdifEncoder::Upmix::TimeDomainNative51);
+  REQUIRE(rms.size() >= 6);
+  CHECK(rms[4] > 0.05);
+  CHECK(rms[5] > 0.05);
+  CHECK(rms[2] < 0.02);
+  CHECK(rms[3] < 0.02);
+}
+
+TEST_CASE("Time-domain Native 5.1 mode does not matrix-upmix stereo padded into a 5.1 endpoint")
+{
+  const std::vector<double> legacy =
+      EncodeUpmixRms(SpdifEncoder::Upmix::TimeDomain, true, false);
+  const std::vector<double> strict =
+      EncodeUpmixRms(SpdifEncoder::Upmix::TimeDomainNative51, true, false);
+  REQUIRE(legacy.size() >= 6);
+  REQUIRE(strict.size() >= 6);
+
+  // The legacy option treats a front-only signal in a 5.1 endpoint as stereo.
+  CHECK(legacy[4] > 0.03);
+  CHECK(legacy[5] > 0.03);
+
+  // The strict option trusts the multichannel endpoint layout: no center/LFE/rear matrix.
+  CHECK(strict[0] > 0.03);
+  CHECK(strict[1] > 0.03);
+  CHECK(strict[2] < 0.005);
+  CHECK(strict[3] < 0.005);
+  CHECK(strict[4] < 0.005);
+  CHECK(strict[5] < 0.005);
+}
+
+TEST_CASE("Time-domain Native 5.1 mode preserves active native 5.1 channels")
+{
+  const std::vector<double> baseline =
+      EncodeUpmixRms(SpdifEncoder::Upmix::Off, true, true);
+  const std::vector<double> strict =
+      EncodeUpmixRms(SpdifEncoder::Upmix::TimeDomainNative51, true, true);
+  REQUIRE(baseline.size() >= 6);
+  REQUIRE(strict.size() >= 6);
+  for (int ch = 0; ch < 6; ++ch)
+  {
+    CHECK(strict[ch] > 0.02);
+    CHECK(std::fabs(strict[ch] - baseline[ch]) < 0.01);
+  }
 }
 
 TEST_CASE("upmix=surround steers anti-phase stereo into the surround channels")
