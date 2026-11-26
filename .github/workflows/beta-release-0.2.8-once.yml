@@ -1,0 +1,139 @@
+name: One-time Publish 0.2.8-beta
+
+on:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-publish:
+    if: ${{ contains(github.event.head_commit.message, 'Add one-time v0.2.8-beta publish workflow') }}
+    name: Build, test, package and publish v0.2.8-beta
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Record source commit
+        id: source
+        shell: pwsh
+        run: |
+          $sha = git rev-parse HEAD
+          "source_sha=$sha" >> $env:GITHUB_OUTPUT
+          Write-Host "Packaging source commit $sha"
+
+      - name: Cache FFmpeg dev libs
+        id: ffcache
+        uses: actions/cache@v4
+        with:
+          path: third_party/ffmpeg
+          key: ffmpeg-${{ runner.os }}-${{ hashFiles('scripts/fetch-ffmpeg.ps1') }}
+
+      - name: Fetch FFmpeg
+        if: steps.ffcache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: ./scripts/fetch-ffmpeg.ps1
+
+      - name: Configure + build 0.2.8-beta (Release)
+        shell: pwsh
+        run: |
+          cmake -S engine -B engine/build -G "Visual Studio 17 2022" -A x64 "-DVAC3_VERSION=0.2.8-beta"
+          if ($LASTEXITCODE -ne 0) { throw "CMake configure failed ($LASTEXITCODE)" }
+          cmake --build engine/build --config Release
+          if ($LASTEXITCODE -ne 0) { throw "Release build failed ($LASTEXITCODE)" }
+
+      - name: Unit tests (ctest)
+        shell: pwsh
+        run: |
+          ctest --test-dir engine/build -C Release --output-on-failure
+          if ($LASTEXITCODE -ne 0) { throw "CTest failed ($LASTEXITCODE)" }
+
+      - name: Assemble distribution
+        shell: pwsh
+        run: |
+          $d = "dist"
+          New-Item -ItemType Directory -Force -Path "$d/scripts" | Out-Null
+          Copy-Item engine/build/Release/*.exe $d
+          Copy-Item engine/build/Release/*.dll $d
+          foreach ($x in 'VCRUNTIME140.dll','VCRUNTIME140_1.dll','MSVCP140.dll') {
+            Copy-Item "$env:WINDIR/System32/$x" $d -Force
+          }
+          Copy-Item scripts/*.ps1 "$d/scripts"
+          Copy-Item README.md,LICENSE,NOTICE.md,CLAUDE.md $d
+          Copy-Item installer/supervisor.vbs,installer/stop-engine.ps1,installer/app.ico $d
+          Copy-Item installer/quickstart.txt "$d/QUICKSTART.txt"
+          Copy-Item installer/default.conf "$d/virtual-ac3-encoder.conf"
+
+      - name: Create portable ZIP
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist/* -DestinationPath "virtual-ac3-encoder-0.2.8-beta-win64.zip" -Force
+
+      - name: Build installer (Inno Setup)
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup -y --no-progress | Out-Null
+            $cmd = Get-Command ISCC.exe -ErrorAction SilentlyContinue
+            $iscc = if ($cmd) { $cmd.Source } else { "$env:ProgramData\chocolatey\bin\ISCC.exe" }
+          }
+          $src = (Resolve-Path dist).Path
+          & $iscc "/DAppVersion=0.2.8-beta" "/DSourceDir=$src" installer/virtual-ac3-encoder.iss
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed ($LASTEXITCODE)" }
+          if (-not (Test-Path "installer/Output/virtual-ac3-encoder-setup-0.2.8-beta.exe")) {
+            throw "Expected installer was not created"
+          }
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: virtual-ac3-encoder-0.2.8-beta
+          path: |
+            virtual-ac3-encoder-0.2.8-beta-win64.zip
+            installer/Output/virtual-ac3-encoder-setup-0.2.8-beta.exe
+
+      - name: Publish GitHub prerelease and verify assets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "v0.2.8-beta"
+          $zip = "virtual-ac3-encoder-0.2.8-beta-win64.zip"
+          $exe = "installer/Output/virtual-ac3-encoder-setup-0.2.8-beta.exe"
+          $notes = @"
+          **0.2.8-beta — audio pipeline stability update**
+
+          - Preserves the RingBuffer single-producer/single-consumer contract during drift correction.
+          - Orders AC-3/DTS and PCM worker shutdown before shared meter state is updated.
+          - Calibrates generated Time-domain Matrix LFE program level to -10 dB before the AC-3 decoder's +10 dB reproduction gain.
+          - Adds regression tests for Time-domain matrix steering, LFE level, native 5.1 bypass, and RingBuffer discard accounting.
+
+          AC-3 5.1, the Extreme latency preset, the 1536-sample AC-3 codec frame, and IEC 61937 burst framing remain intact. The 256-frame render period remains an endpoint-dependent request, not a guaranteed hardware period.
+
+          Windows x64 Release build and CTest passed. No virtual audio driver change is included.
+          "@
+          Set-Content -Path release-notes.md -Value $notes -Encoding utf8
+
+          gh release create $tag --title "0.2.8-beta" --prerelease --notes-file release-notes.md $zip $exe
+          if ($LASTEXITCODE -ne 0) { throw "GitHub prerelease publish failed ($LASTEXITCODE)" }
+
+          $release = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$tag" | ConvertFrom-Json
+          if (-not $release.prerelease) { throw "Release is not marked as a prerelease" }
+          $assetNames = @($release.assets | ForEach-Object { $_.name })
+          foreach ($required in @($zip, "virtual-ac3-encoder-setup-0.2.8-beta.exe")) {
+            if ($assetNames -notcontains $required) { throw "Missing release asset: $required" }
+          }
+
+          $ref = gh api "repos/$env:GITHUB_REPOSITORY/git/ref/tags/$tag" | ConvertFrom-Json
+          $tagTarget = $ref.object.sha
+          if ($ref.object.type -eq "tag") {
+            $tagObject = gh api "repos/$env:GITHUB_REPOSITORY/git/tags/$tagTarget" | ConvertFrom-Json
+            $tagTarget = $tagObject.object.sha
+          }
+          $sourceSha = "${{ steps.source.outputs.source_sha }}"
+          if ($tagTarget -ne $sourceSha) {
+            throw "Tag target $tagTarget does not match packaged source $sourceSha"
+          }
+          Write-Host "Verified prerelease $tag, both assets and source commit $sourceSha"
