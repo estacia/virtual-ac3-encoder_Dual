@@ -1,0 +1,232 @@
+name: Stable 1.0.1 Release
+
+on:
+  push:
+    branches:
+      - release/1.0.1-stable
+
+permissions:
+  contents: write
+
+concurrency:
+  group: stable-release-1.0.1
+  cancel-in-progress: false
+
+jobs:
+  build-driver:
+    name: Build precise WaveRT driver (Windows x64 / WDK)
+    runs-on: windows-2025-vs2026
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v2
+        with:
+          msbuild-architecture: x64
+
+      - name: Restore WDK NuGet package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          msbuild .\driver\SimpleAudioSample.sln -t:Restore /p:Configuration=Release /p:Platform=x64 /v:minimal
+          if ($LASTEXITCODE -ne 0) { throw "WDK NuGet restore failed ($LASTEXITCODE)" }
+
+          $wdkRoot = Join-Path $env:USERPROFILE '.nuget\packages\microsoft.windows.wdk.x64\10.0.28000.2526\c'
+          $stampInf = Join-Path $wdkRoot 'bin\10.0.28000.0\x64\stampinf.exe'
+          if (-not (Test-Path $stampInf)) { throw "WDK stampinf.exe not found: $stampInf" }
+
+      - name: Build WDK driver Release x64
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          msbuild .\driver\SimpleAudioSample.sln -restore /m /p:Configuration=Release /p:Platform=x64 /v:minimal
+          if ($LASTEXITCODE -ne 0) { throw "WDK driver build failed ($LASTEXITCODE)" }
+
+      - name: Stage signed driver package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $package = Join-Path $env:GITHUB_WORKSPACE 'driver\x64\Release\package'
+          foreach ($name in 'SimpleAudioSample.inf', 'SimpleAudioSample.sys', 'simpleaudiosample.cat') {
+            $path = Join-Path $package $name
+            if (-not (Test-Path $path)) { throw "Required driver package file missing: $path" }
+          }
+
+          $dest = Join-Path $env:GITHUB_WORKSPACE 'driver-package\driver\x64\Release\package'
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+          Copy-Item "$package\*" $dest -Recurse -Force
+
+          $packageCert = Join-Path $env:GITHUB_WORKSPACE 'driver\x64\Release\package.cer'
+          if (Test-Path $packageCert) {
+            Copy-Item $packageCert (Join-Path (Split-Path $dest -Parent) 'package.cer') -Force
+          }
+
+          $signature = Get-AuthenticodeSignature (Join-Path $dest 'SimpleAudioSample.sys')
+          Write-Host "Driver signature status: $($signature.Status)"
+          Get-ChildItem $dest -File | Select-Object Name, Length | Format-Table -AutoSize
+
+      - name: Upload driver package
+        uses: actions/upload-artifact@v4
+        with:
+          name: virtual-ac3-encoder-driver-package-1.0.1
+          path: driver-package/driver/
+          if-no-files-found: error
+          retention-days: 30
+
+  build-app:
+    name: Build engine, Control Center, and installers
+    runs-on: windows-2022
+    needs: build-driver
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache FFmpeg development libraries
+        id: ffmpeg-cache
+        uses: actions/cache@v4
+        with:
+          path: third_party/ffmpeg
+          key: ffmpeg-${{ runner.os }}-${{ hashFiles('scripts/fetch-ffmpeg.ps1') }}
+
+      - name: Fetch FFmpeg
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: ./scripts/fetch-ffmpeg.ps1
+
+      - name: Configure Windows x64 Release
+        run: cmake -S engine -B engine/build -G "Visual Studio 17 2022" -A x64 "-DVAC3_VERSION=1.0.1"
+
+      - name: Build Release
+        run: cmake --build engine/build --config Release
+
+      - name: Run unit tests
+        run: ctest --test-dir engine/build -C Release --output-on-failure
+
+      - name: Download WDK driver package
+        uses: actions/download-artifact@v4
+        with:
+          name: virtual-ac3-encoder-driver-package-1.0.1
+          path: driver-package/driver
+
+      - name: Verify driver and assemble distribution
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $driverPackage = "driver-package/driver/x64/Release/package"
+          foreach ($name in 'SimpleAudioSample.inf', 'SimpleAudioSample.sys', 'simpleaudiosample.cat') {
+            $path = Join-Path $driverPackage $name
+            if (-not (Test-Path $path)) { throw "Downloaded driver package file missing: $path" }
+          }
+
+          $d = "dist"
+          New-Item -ItemType Directory -Force -Path "$d/scripts" | Out-Null
+          Copy-Item engine/build/Release/*.exe $d
+          Copy-Item engine/build/Release/*.dll $d
+          foreach ($runtime in 'VCRUNTIME140.dll', 'VCRUNTIME140_1.dll', 'MSVCP140.dll') {
+            $source = Join-Path "$env:WINDIR/System32" $runtime
+            if (Test-Path $source) { Copy-Item $source $d -Force }
+          }
+          Copy-Item scripts/*.ps1 "$d/scripts"
+          Copy-Item README.md, LICENSE, NOTICE.md, CLAUDE.md "$d"
+          Copy-Item installer/supervisor.vbs, installer/stop-engine.ps1, installer/app.ico "$d"
+          Copy-Item installer/quickstart.txt "$d/QUICKSTART.txt"
+          Copy-Item installer/default.conf "$d/virtual-ac3-encoder.conf"
+          Copy-Item driver-package/driver "$d/driver" -Recurse -Force
+
+      - name: Create portable ZIP
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist/* -DestinationPath "virtual-ac3-encoder-1.0.1-win64.zip" -Force
+
+      - name: Create standalone WaveRT driver ZIP
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist/driver -DestinationPath "virtual-ac3-encoder-driver-1.0.1-win64.zip" -Force
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup -y --no-progress | Out-Null
+            $cmd = Get-Command ISCC.exe -ErrorAction SilentlyContinue
+            $iscc = if ($cmd) { $cmd.Source } else { "$env:ProgramData\chocolatey\bin\ISCC.exe" }
+          }
+          if (-not (Test-Path $iscc)) { throw "Inno Setup compiler was not found." }
+          $src = (Resolve-Path dist).Path
+          & $iscc "/DAppVersion=1.0.1" "/DSourceDir=$src" installer/virtual-ac3-encoder.iss
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed ($LASTEXITCODE)" }
+
+      - name: Generate SHA-256 checksums
+        shell: pwsh
+        run: |
+          $files = @(
+            "virtual-ac3-encoder-1.0.1-win64.zip",
+            "virtual-ac3-encoder-driver-1.0.1-win64.zip",
+            "installer/Output/virtual-ac3-encoder-setup-1.0.1.exe"
+          )
+          $lines = foreach ($file in $files) {
+            $hash = (Get-FileHash $file -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $([System.IO.Path]::GetFileName($file))"
+          }
+          $lines | Set-Content -Path SHA256SUMS.txt -Encoding ascii
+
+      - name: Upload application artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: virtual-ac3-encoder-1.0.1-stable-win64
+          path: |
+            virtual-ac3-encoder-1.0.1-win64.zip
+            virtual-ac3-encoder-driver-1.0.1-win64.zip
+            installer/Output/virtual-ac3-encoder-setup-1.0.1.exe
+            SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: Publish GitHub v1.0.1 Stable release
+    runs-on: windows-2022
+    needs: build-app
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: virtual-ac3-encoder-1.0.1-stable-win64
+          path: release-assets
+
+      - name: Publish GitHub stable release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "v1.0.1"
+          $zip = "release-assets/virtual-ac3-encoder-1.0.1-win64.zip"
+          $driverZip = "release-assets/virtual-ac3-encoder-driver-1.0.1-win64.zip"
+          $installer = "release-assets/virtual-ac3-encoder-setup-1.0.1.exe"
+          $checksums = "release-assets/SHA256SUMS.txt"
+          $notes = @'
+          # Dolby Control Center 1.0.1 Stable
+
+          ## Changes
+          - Includes the precise WaveRT packet notification and QPC position-timing update from PR #16. The fixed 1 ms periodic notification timer is replaced with packet-period one-shot high-resolution notifications, fractional-byte position accounting, pause/resume carry-forward, and delayed-period accounting.
+          - Adds **Time-domain Matrix + Native 5.1 Untouched**. The existing Time-domain Matrix mode is preserved. The new strict mode applies the matrix to 2-channel input only; any multichannel input bypasses the matrix even when only FL/FR currently carry signal.
+          - Keeps the 1.0.0 STREAM DIAGNOSTICS read-only shared-memory fix.
+
+          ## Validation
+          - Windows x64 engine and Control Center Release build
+          - CTest unit tests, including strict Time-domain / native 5.1 behavior
+          - Windows WDK x64 driver Release build
+          - Portable ZIP, standalone driver ZIP, and Inno Setup installer packaging
+
+          The WaveRT driver is test-signed. Installing it may require an elevated PowerShell, a reboot, Secure Boot changes, and Windows test-signing mode. The installer bundles the package but does not silently alter boot security settings or install the driver automatically.
+          Actual WaveRT packet timing and long-duration audio behavior still require validation on the target Windows PC and audio endpoint.
+
+          ## Downloads
+          - virtual-ac3-encoder-setup-1.0.1.exe — per-user Dolby Control Center installer, including the updated driver files and install script.
+          - virtual-ac3-encoder-1.0.1-win64.zip — portable Windows x64 application and driver bundle.
+          - virtual-ac3-encoder-driver-1.0.1-win64.zip — standalone updated WaveRT driver package.
+          - SHA256SUMS.txt — checksums for all release binaries.
+          '@
+          gh release create $tag --target $env:GITHUB_SHA --title "1.0.1 Stable" --notes $notes $zip $driverZip $installer $checksums
+          if ($LASTEXITCODE -ne 0) { throw "GitHub Release publication failed ($LASTEXITCODE)" }
