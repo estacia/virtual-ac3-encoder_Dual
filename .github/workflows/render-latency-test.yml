@@ -51,7 +51,11 @@ jobs:
           New-Item -ItemType Directory -Force -Path "$dist/scripts" | Out-Null
           Copy-Item scripts/*.ps1 "$dist/scripts"
           Copy-Item README.md, LICENSE, NOTICE.md "$dist"
-          Copy-Item installer/default.conf "$dist/virtual-ac3-encoder.conf"
+          $configPath = Join-Path $dist "virtual-ac3-encoder.conf"
+          Copy-Item installer/default.conf $configPath
+          $config = [System.IO.File]::ReadAllText($configPath)
+          $config = $config -replace '(?m)^latency=balanced(?=\r?$)', 'latency=extreme'
+          [System.IO.File]::WriteAllText($configPath, $config, [System.Text.UTF8Encoding]::new($false))
           Copy-Item installer/quickstart.txt "$dist/QUICKSTART.txt"
           Copy-Item installer/supervisor.vbs, installer/stop-engine.ps1 "$dist"
           Compress-Archive -Path "$dist/*" -DestinationPath "virtual-ac3-encoder-0.2.10-beta-render128-win64.zip" -Force
