@@ -19,6 +19,7 @@
 #include <mmdeviceapi.h>
 
 #include <atomic>
+#include <cstdint>
 #include <condition_variable>
 #include <mutex>
 #include <thread>
