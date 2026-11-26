@@ -35,7 +35,7 @@ public:
     int64_t  bitRate = 640000;
     int64_t  dtsBitRate = 1536000;
     uint32_t safeFrames = 1536;    // target PCM cushion after the initial AC-3 frame
-    uint32_t renderPeriodFrames = 256; // ~5.33 ms at 48 kHz; endpoint may force fallback
+    uint32_t renderPeriodFrames = 128; // ~2.67 ms at 48 kHz; endpoint falls back through 256/512/1024/full burst
     SpdifEncoder::Upmix upmix = SpdifEncoder::Upmix::Off;
     int      surroundWindowSize = 4096; // 1024 (512-sample hop) for low-latency Extreme mode
     bool     upmixSurround = false; // legacy compatibility flag (mapped to upmix if true)
