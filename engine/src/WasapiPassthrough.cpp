@@ -172,10 +172,12 @@ bool WasapiPassthrough::Init(IMMDevice* dev, RingBuffer* ring, const CaptureForm
                  silenceBytes);
     return false;
   }
-  queueSpaceEvent_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-  if (!queueSpaceEvent_)
+  queueSpaceSemaphore_ = CreateSemaphoreW(
+      nullptr, static_cast<LONG>(kEncodedQueueCapacity),
+      static_cast<LONG>(kEncodedQueueCapacity), nullptr);
+  if (!queueSpaceSemaphore_)
   {
-    std::fprintf(stderr, "[WasapiPassthrough] failed to create queue-space event (%lu).\\n",
+    std::fprintf(stderr, "[WasapiPassthrough] failed to create queue-space semaphore (%lu).\n",
                  GetLastError());
     return false;
   }
@@ -319,7 +321,15 @@ bool WasapiPassthrough::FillRenderBuffer(BYTE* out)
         currentBurstHasAudio_ = true;
         currentBurstPending_ = true;
         primed_ = true;
-        if (queueSpaceEvent_) SetEvent(queueSpaceEvent_);
+        if (!queueSpaceSemaphore_ || !ReleaseSemaphore(queueSpaceSemaphore_, 1, nullptr))
+        {
+          failed_.store(true, std::memory_order_release);
+          running_.store(false, std::memory_order_release);
+          if (diagnostics_) diagnostics_->outputWasapiErrors.fetch_add(1, std::memory_order_relaxed);
+          std::fprintf(stderr, "[WasapiPassthrough] failed to return encoded queue slot (%lu).\n",
+                       GetLastError());
+          if (stopEvent_) SetEvent(stopEvent_);
+        }
       }
       else
       {
@@ -371,26 +381,6 @@ void WasapiPassthrough::EncoderThreadProc()
 
   while (running_.load(std::memory_order_relaxed))
   {
-    while (running_.load(std::memory_order_relaxed) &&
-           queuedBursts_.Size() >= kEncodedQueueCapacity)
-    {
-      // Auto-reset event preserves a pop notification even if it arrives just before
-      // the wait begins; a stale signal simply causes one harmless predicate recheck.
-      if (!queueSpaceEvent_ ||
-          WaitForSingleObject(queueSpaceEvent_, INFINITE) != WAIT_OBJECT_0)
-      {
-        if (running_.load(std::memory_order_relaxed))
-        {
-          failed_.store(true, std::memory_order_release);
-          running_.store(false, std::memory_order_release);
-          if (diagnostics_) diagnostics_->outputWasapiErrors.fetch_add(1, std::memory_order_relaxed);
-          if (stopEvent_) SetEvent(stopEvent_);
-        }
-        break;
-      }
-    }
-    if (!running_.load(std::memory_order_relaxed)) break;
-
     size_t available = ring_->BytesAvailable();
     if (!encoderPrimed)
     {
@@ -431,7 +421,28 @@ void WasapiPassthrough::EncoderThreadProc()
       ring_->WaitForData(encoderPrimed ? packetBytes : primeBytes, waitSlice);
       continue;
     }
-    if (ring_->Read(staging_.data(), packetBytes) != packetBytes) continue;
+    HANDLE queueWaits[2] = { queueSpaceSemaphore_, stopEvent_ };
+    const DWORD queueWait = WaitForMultipleObjects(2, queueWaits, FALSE, INFINITE);
+    if (queueWait == WAIT_OBJECT_0 + 1) break;
+    if (queueWait != WAIT_OBJECT_0)
+    {
+      failed_.store(true, std::memory_order_release);
+      running_.store(false, std::memory_order_release);
+      if (diagnostics_) diagnostics_->outputWasapiErrors.fetch_add(1, std::memory_order_relaxed);
+      std::fprintf(stderr, "[WasapiPassthrough] queue-slot wait failed (%lu).\n", GetLastError());
+      if (stopEvent_) SetEvent(stopEvent_);
+      break;
+    }
+    if (!running_.load(std::memory_order_relaxed))
+    {
+      ReleaseSemaphore(queueSpaceSemaphore_, 1, nullptr);
+      break;
+    }
+    if (ring_->Read(staging_.data(), packetBytes) != packetBytes)
+    {
+      ReleaseSemaphore(queueSpaceSemaphore_, 1, nullptr);
+      continue;
+    }
 
     encoderPendingFrames_.fetch_add(static_cast<uint32_t>(framesPerPacket_), std::memory_order_acq_rel);
     const auto encodeStart = std::chrono::steady_clock::now();
@@ -449,6 +460,7 @@ void WasapiPassthrough::EncoderThreadProc()
 
     if (encodedBytes < 0)
     {
+      ReleaseSemaphore(queueSpaceSemaphore_, 1, nullptr);
       encoderPendingFrames_.fetch_sub(static_cast<uint32_t>(framesPerPacket_), std::memory_order_acq_rel);
       failed_.store(true, std::memory_order_release);
       running_.store(false, std::memory_order_release);
@@ -468,6 +480,7 @@ void WasapiPassthrough::EncoderThreadProc()
 
     if (!running_.load(std::memory_order_relaxed))
     {
+      ReleaseSemaphore(queueSpaceSemaphore_, 1, nullptr);
       encoderPendingFrames_.fetch_sub(static_cast<uint32_t>(framesPerPacket_), std::memory_order_acq_rel);
       break;
     }
@@ -475,11 +488,12 @@ void WasapiPassthrough::EncoderThreadProc()
     // push failure is an invariant violation rather than a recoverable full-queue case.
     if (!queuedBursts_.TryPush(encoderBurst_))
     {
+      ReleaseSemaphore(queueSpaceSemaphore_, 1, nullptr);
       encoderPendingFrames_.fetch_sub(static_cast<uint32_t>(framesPerPacket_), std::memory_order_acq_rel);
       failed_.store(true, std::memory_order_release);
       running_.store(false, std::memory_order_release);
       if (diagnostics_) diagnostics_->outputWasapiErrors.fetch_add(1, std::memory_order_relaxed);
-      std::fprintf(stderr, "[WasapiPassthrough] SPSC encoded queue invariant failed.\\n");
+      std::fprintf(stderr, "[WasapiPassthrough] SPSC encoded queue invariant failed.\n");
       queueCv_.notify_all();
       ring_->WakeWaiters();
       if (stopEvent_) SetEvent(stopEvent_);
@@ -497,7 +511,7 @@ void WasapiPassthrough::EncoderThreadProc()
 
 bool WasapiPassthrough::Start()
 {
-  if (!client_ || !render_ || !dataEvent_ || !stopEvent_)
+  if (!client_ || !render_ || !dataEvent_ || !stopEvent_ || !queueSpaceSemaphore_)
   {
     std::fprintf(stderr, "[WasapiPassthrough] Start requested before successful Init\n");
     return false;
@@ -613,7 +627,6 @@ void WasapiPassthrough::Stop()
   running_.store(false, std::memory_order_release);
   if (stopEvent_) SetEvent(stopEvent_);
   queueCv_.notify_all();
-  if (queueSpaceEvent_) SetEvent(queueSpaceEvent_);
   if (ring_) ring_->WakeWaiters();
 
   if (thread_.joinable()) thread_.join();
@@ -640,7 +653,7 @@ void WasapiPassthrough::Stop()
   dev_.Reset();
   if (dataEvent_) { CloseHandle(dataEvent_); dataEvent_ = nullptr; }
   if (stopEvent_) { CloseHandle(stopEvent_); stopEvent_ = nullptr; }
-  if (queueSpaceEvent_) { CloseHandle(queueSpaceEvent_); queueSpaceEvent_ = nullptr; }
+  if (queueSpaceSemaphore_) { CloseHandle(queueSpaceSemaphore_); queueSpaceSemaphore_ = nullptr; }
 }
 
 void WasapiPassthrough::UpdateEncoderSnapshot()
