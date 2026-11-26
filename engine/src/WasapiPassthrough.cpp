@@ -557,6 +557,7 @@ bool WasapiPassthrough::Start()
   {
     failed_.store(true, std::memory_order_relaxed);
     running_.store(false, std::memory_order_relaxed);
+    if (stopEvent_) SetEvent(stopEvent_);
     if (diagnostics_) diagnostics_->outputWasapiErrors.fetch_add(1, std::memory_order_relaxed);
     std::fprintf(stderr, "[WasapiPassthrough] initial GetBuffer failed: %s\n", HrStr(hr).c_str());
     queueCv_.notify_all();
@@ -571,6 +572,7 @@ bool WasapiPassthrough::Start()
   {
     failed_.store(true, std::memory_order_relaxed);
     running_.store(false, std::memory_order_relaxed);
+    if (stopEvent_) SetEvent(stopEvent_);
     if (diagnostics_) diagnostics_->outputWasapiErrors.fetch_add(1, std::memory_order_relaxed);
     std::fprintf(stderr, "[WasapiPassthrough] initial ReleaseBuffer failed: %s\n", HrStr(hr).c_str());
     queueCv_.notify_all();
@@ -595,6 +597,7 @@ bool WasapiPassthrough::Start()
   {
     failed_.store(true, std::memory_order_relaxed);
     running_.store(false, std::memory_order_relaxed);
+    if (stopEvent_) SetEvent(stopEvent_);
     if (diagnostics_) diagnostics_->outputWasapiErrors.fetch_add(1, std::memory_order_relaxed);
     std::fprintf(stderr, "[WasapiPassthrough] client Start failed: %s\n", HrStr(hr).c_str());
     queueCv_.notify_all();
@@ -640,6 +643,14 @@ void WasapiPassthrough::Stop()
     if (ms)
     {
       ms->active = 0;
+      InterlockedExchange(&ms->encoderQueueBursts, 0);
+      InterlockedExchange(&ms->encoderPendingFrames, 0);
+      InterlockedExchange(&ms->currentBurstRemainingFrames, 0);
+      InterlockedExchange(&ms->renderBufferFrames, 0);
+      InterlockedExchange64(&ms->encodeDurationLastUs, 0);
+      InterlockedExchange64(&ms->encodeDurationMaxUs, 0);
+      InterlockedExchange64(&ms->renderEventLastUs, 0);
+      InterlockedExchange64(&ms->renderEventMaxUs, 0);
       InterlockedExchange(&ms->surroundFilterState, 0);
       InterlockedExchange(&ms->surroundFilterHopFrames, 0);
       InterlockedExchange64(&ms->surroundFilterFifoFrames, 0);
