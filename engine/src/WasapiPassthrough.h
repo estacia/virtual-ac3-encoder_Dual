@@ -11,6 +11,7 @@
 #include "AudioDiagnostics.h"
 #include "MeterSharedState.h"
 #include "RingBuffer.h"
+#include "SpscQueue.h"
 #include "SpdifEncoder.h"
 #include "WasapiCapture.h" // CaptureFormat
 #include <array>
@@ -88,18 +89,26 @@ private:
 
   HANDLE dataEvent_ = nullptr;
   HANDLE stopEvent_ = nullptr;
+  HANDLE queueSpaceSemaphore_ = nullptr;
   std::thread thread_;        // short-period WASAPI render thread
   std::thread encoderThread_; // PCM -> AC-3/DTS -> IEC 61937 worker
   std::atomic_bool running_{false};
   std::atomic_bool failed_{false};
 
+  // Keep the existing 12-burst safety reserve. The render-side queue operations are
+  // now bounded SPSC copies with acquire/release publication; the render thread never
+  // waits for a mutex owned by the encoder worker.
   static constexpr size_t kEncodedQueueCapacity = 12;
-  mutable std::mutex queueMutex_;
+  using EncodedBurst = std::array<uint8_t, kMaxBurstBytes>;
+  SpscQueue<EncodedBurst, kEncodedQueueCapacity> queuedBursts_;
+  std::mutex queueWaitMutex_; // used only by the encoder/startup waiters
   std::condition_variable queueCv_;
-  size_t queueReadIndex_ = 0;
-  size_t queueWriteIndex_ = 0;
-  size_t queueCount_ = 0;
-  std::atomic<uint32_t> encoderPendingFrames_{0};
+  std::atomic<uint32_t> encoderPendingFrames_{0}; // input frames not yet submitted to WASAPI
+  std::atomic<uint32_t> currentBurstRemainingFramesSnapshot_{0};
+  std::atomic<uint64_t> encodeDurationLastUs_{0};
+  std::atomic<uint64_t> encodeDurationMaxUs_{0};
+  std::atomic<uint64_t> renderEventLastUs_{0};
+  std::atomic<uint64_t> renderEventMaxUs_{0};
   // The render thread only requests trims; the encoder worker applies them as the sole
   // RingBuffer consumer. This preserves the ring's single-consumer contract.
   std::atomic<uint64_t> pendingTrimFrames_{0};
@@ -115,13 +124,13 @@ private:
   bool     primed_ = false;
   uint32_t burstOffsetFrames_ = 1536;
   bool     currentBurstHasAudio_ = false;
+  bool     currentBurstPending_ = false;
 
   // Encoder worker and render thread buffers.
   std::vector<uint8_t> staging_;
   std::vector<uint8_t> silence_;
-  std::vector<uint8_t> encoderBurst_;
-  std::vector<uint8_t> queuedBursts_;
-  std::vector<uint8_t> currentBurst_;
-  std::vector<uint8_t> silenceBurst_;
+  EncodedBurst encoderBurst_{};
+  EncodedBurst currentBurst_{};
+  EncodedBurst silenceBurst_{};
   MeterSharedMemory    sharedMem_;
 };

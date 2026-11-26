@@ -6,9 +6,9 @@
 #include <windows.h>
 #include "AudioDiagnostics.h"
 
-constexpr const wchar_t* kMeterSharedMemName = L"Local\\VirtualAc3EncoderMetersV3";
+constexpr const wchar_t* kMeterSharedMemName = L"Local\\VirtualAc3EncoderMetersV4";
 constexpr uint32_t kMeterMagic = 0x56414333; // "VAC3"
-constexpr uint32_t kMeterVersion = 3;
+constexpr uint32_t kMeterVersion = 4;
 
 #pragma pack(push, 8)
 struct MeterSharedState
@@ -33,6 +33,14 @@ struct MeterSharedState
   volatile LONG64 ringFillFrames;
   volatile LONG64 ringPeakFrames;
   volatile LONG ringCapacityFrames;
+  volatile LONG encoderQueueBursts;             // completed IEC 61937 bursts waiting for render
+  volatile LONG encoderPendingFrames;            // input frames not yet submitted to WASAPI
+  volatile LONG currentBurstRemainingFrames;     // unsubmitted frames in the active encoded burst
+  volatile LONG renderBufferFrames;              // actual exclusive WASAPI buffer size
+  volatile LONG64 encodeDurationLastUs;          // latest FFmpeg packet encode time
+  volatile LONG64 encodeDurationMaxUs;           // peak FFmpeg packet encode time since start
+  volatile LONG64 renderEventLastUs;             // latest render-event processing duration
+  volatile LONG64 renderEventMaxUs;              // peak render-event processing duration
   volatile LONG surroundFilterState;       // SpdifEncoder::FilterStatus numeric value
   volatile LONG surroundFilterHopFrames;   // FFT output hop, not end-to-end latency
   volatile LONG64 surroundFilterFifoFrames;

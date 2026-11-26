@@ -1058,7 +1058,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int) {
         ImGui::Spacing();
         if (ImGui::CollapsingHeader("STREAM DIAGNOSTICS")) {
             const MeterSharedState* state = g_meterMem.IsOpen() ? g_meterMem.Get() : nullptr;
-            if (state && state->version >= 3) {
+            if (state && state->version >= 4) {
                 const auto readCounter = [](const volatile LONG64* value) {
                     return static_cast<unsigned long long>(
                         InterlockedCompareExchange64(const_cast<volatile LONG64*>(value), 0, 0));
@@ -1085,6 +1085,35 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int) {
                     driftTrim, 1000.0 * static_cast<double>(driftTrim) / rate);
                 ImGui::Text("Ring fill: %llu / %u frames | peak: %llu frames",
                     ringFill, ringCapacity, ringPeak);
+
+                const auto readLong = [](const volatile LONG* value) {
+                    return InterlockedCompareExchange(
+                        const_cast<volatile LONG*>(value), 0, 0);
+                };
+                const unsigned int queueBursts = static_cast<unsigned int>(
+                    readLong(&state->encoderQueueBursts));
+                const unsigned int pendingFrames = static_cast<unsigned int>(
+                    readLong(&state->encoderPendingFrames));
+                const unsigned int activeBurstRemaining = static_cast<unsigned int>(
+                    readLong(&state->currentBurstRemainingFrames));
+                const unsigned int renderBufferFrames = static_cast<unsigned int>(
+                    readLong(&state->renderBufferFrames));
+                const unsigned long long encodeLastUs = readCounter(&state->encodeDurationLastUs);
+                const unsigned long long encodeMaxUs = readCounter(&state->encodeDurationMaxUs);
+                const unsigned long long renderLastUs = readCounter(&state->renderEventLastUs);
+                const unsigned long long renderMaxUs = readCounter(&state->renderEventMaxUs);
+                const unsigned long long pipelineFrames =
+                    ringFill + pendingFrames + renderBufferFrames;
+                ImGui::Text("Encoder queue: %u bursts | pending before WASAPI: %u frames (%.2f ms)",
+                    queueBursts, pendingFrames,
+                    1000.0 * static_cast<double>(pendingFrames) / rate);
+                ImGui::Text("Active burst remaining: %u | WASAPI render buffer: %u frames (%.2f ms)",
+                    activeBurstRemaining, renderBufferFrames,
+                    1000.0 * static_cast<double>(renderBufferFrames) / rate);
+                ImGui::Text("Estimated pipeline queued: %llu frames (%.2f ms; excludes decoder/device latency)",
+                    pipelineFrames, 1000.0 * static_cast<double>(pipelineFrames) / rate);
+                ImGui::Text("Encode time: last %llu / max %llu us | Render event: last %llu / max %llu us",
+                    encodeLastUs, encodeMaxUs, renderLastUs, renderMaxUs);
 
                 const LONG filterState = InterlockedCompareExchange(
                     const_cast<volatile LONG*>(&state->surroundFilterState), 0, 0);

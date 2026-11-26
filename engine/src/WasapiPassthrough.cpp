@@ -158,10 +158,9 @@ bool WasapiPassthrough::Init(IMMDevice* dev, RingBuffer* ring, const CaptureForm
   const size_t packetBytes = static_cast<size_t>(framesPerPacket_) * capBytesPerFrame_;
   staging_.resize(packetBytes);
   silence_.assign(packetBytes, 0);
-  encoderBurst_.resize(kMaxBurstBytes);
-  queuedBursts_.resize(kEncodedQueueCapacity * kMaxBurstBytes);
-  currentBurst_.resize(kMaxBurstBytes);
-  silenceBurst_.resize(kMaxBurstBytes);
+  encoderBurst_.fill(0);
+  currentBurst_.fill(0);
+  silenceBurst_.fill(0);
 
   // Prepare a valid pause/silence frame. An underrun must never emit malformed
   // all-zero carrier bytes in place of an IEC 61937 burst.
@@ -171,6 +170,15 @@ bool WasapiPassthrough::Init(IMMDevice* dev, RingBuffer* ring, const CaptureForm
   {
     std::fprintf(stderr, "[WasapiPassthrough] failed to prepare valid silence burst (%d bytes).\n",
                  silenceBytes);
+    return false;
+  }
+  queueSpaceSemaphore_ = CreateSemaphoreW(
+      nullptr, static_cast<LONG>(kEncodedQueueCapacity),
+      static_cast<LONG>(kEncodedQueueCapacity), nullptr);
+  if (!queueSpaceSemaphore_)
+  {
+    std::fprintf(stderr, "[WasapiPassthrough] failed to create queue-space semaphore (%lu).\n",
+                 GetLastError());
     return false;
   }
   burstOffsetFrames_ = static_cast<uint32_t>(framesPerPacket_);
@@ -299,7 +307,7 @@ bool WasapiPassthrough::InitExclusive(int rate)
 
 bool WasapiPassthrough::FillRenderBuffer(BYTE* out)
 {
-  if (!out || currentBurst_.size() < burstBytes_ || silenceBurst_.size() < burstBytes_)
+  if (!out || burstBytes_ > currentBurst_.size() || burstBytes_ > silenceBurst_.size())
     return false;
 
   UINT32 outFrames = 0;
@@ -308,29 +316,26 @@ bool WasapiPassthrough::FillRenderBuffer(BYTE* out)
   {
     if (burstOffsetFrames_ >= static_cast<uint32_t>(framesPerPacket_))
     {
-      bool haveEncoded = false;
-      {
-        std::lock_guard<std::mutex> lock(queueMutex_);
-        if (queueCount_ > 0)
-        {
-          const size_t offset = queueReadIndex_ * kMaxBurstBytes;
-          std::memcpy(currentBurst_.data(), queuedBursts_.data() + offset, burstBytes_);
-          queueReadIndex_ = (queueReadIndex_ + 1) % kEncodedQueueCapacity;
-          --queueCount_;
-          encoderPendingFrames_.fetch_sub(static_cast<uint32_t>(framesPerPacket_), std::memory_order_acq_rel);
-          haveEncoded = true;
-        }
-      }
-      if (haveEncoded)
+      if (queuedBursts_.TryPop(currentBurst_))
       {
         currentBurstHasAudio_ = true;
+        currentBurstPending_ = true;
         primed_ = true;
-        queueCv_.notify_one();
+        if (!queueSpaceSemaphore_ || !ReleaseSemaphore(queueSpaceSemaphore_, 1, nullptr))
+        {
+          failed_.store(true, std::memory_order_release);
+          running_.store(false, std::memory_order_release);
+          if (diagnostics_) diagnostics_->outputWasapiErrors.fetch_add(1, std::memory_order_relaxed);
+          std::fprintf(stderr, "[WasapiPassthrough] failed to return encoded queue slot (%lu).\n",
+                       GetLastError());
+          if (stopEvent_) SetEvent(stopEvent_);
+        }
       }
       else
       {
         std::memcpy(currentBurst_.data(), silenceBurst_.data(), burstBytes_);
         currentBurstHasAudio_ = false;
+        currentBurstPending_ = false;
         if (primed_ && diagnostics_)
         {
           diagnostics_->outputUnderrunFrames.fetch_add(
@@ -348,8 +353,15 @@ bool WasapiPassthrough::FillRenderBuffer(BYTE* out)
                 currentBurst_.data() + static_cast<size_t>(burstOffsetFrames_) * kCarrierBytesPerFrame,
                 chunkBytes);
     if (currentBurstHasAudio_) hadAudio = true;
+    if (currentBurstPending_)
+      encoderPendingFrames_.fetch_sub(chunkFrames, std::memory_order_acq_rel);
     outFrames += chunkFrames;
     burstOffsetFrames_ += chunkFrames;
+    if (burstOffsetFrames_ >= static_cast<uint32_t>(framesPerPacket_))
+      currentBurstPending_ = false;
+    currentBurstRemainingFramesSnapshot_.store(
+        currentBurstPending_ ? static_cast<uint32_t>(framesPerPacket_) - burstOffsetFrames_ : 0,
+        std::memory_order_relaxed);
   }
   return hadAudio;
 }
@@ -369,14 +381,6 @@ void WasapiPassthrough::EncoderThreadProc()
 
   while (running_.load(std::memory_order_relaxed))
   {
-    {
-      std::unique_lock<std::mutex> lock(queueMutex_);
-      queueCv_.wait(lock, [&] {
-        return queueCount_ < kEncodedQueueCapacity || !running_.load(std::memory_order_relaxed);
-      });
-    }
-    if (!running_.load(std::memory_order_relaxed)) break;
-
     size_t available = ring_->BytesAvailable();
     if (!encoderPrimed)
     {
@@ -417,15 +421,46 @@ void WasapiPassthrough::EncoderThreadProc()
       ring_->WaitForData(encoderPrimed ? packetBytes : primeBytes, waitSlice);
       continue;
     }
-    if (ring_->Read(staging_.data(), packetBytes) != packetBytes) continue;
+    HANDLE queueWaits[2] = { queueSpaceSemaphore_, stopEvent_ };
+    const DWORD queueWait = WaitForMultipleObjects(2, queueWaits, FALSE, INFINITE);
+    if (queueWait == WAIT_OBJECT_0 + 1) break;
+    if (queueWait != WAIT_OBJECT_0)
+    {
+      failed_.store(true, std::memory_order_release);
+      running_.store(false, std::memory_order_release);
+      if (diagnostics_) diagnostics_->outputWasapiErrors.fetch_add(1, std::memory_order_relaxed);
+      std::fprintf(stderr, "[WasapiPassthrough] queue-slot wait failed (%lu).\n", GetLastError());
+      if (stopEvent_) SetEvent(stopEvent_);
+      break;
+    }
+    if (!running_.load(std::memory_order_relaxed))
+    {
+      ReleaseSemaphore(queueSpaceSemaphore_, 1, nullptr);
+      break;
+    }
+    if (ring_->Read(staging_.data(), packetBytes) != packetBytes)
+    {
+      ReleaseSemaphore(queueSpaceSemaphore_, 1, nullptr);
+      continue;
+    }
 
     encoderPendingFrames_.fetch_add(static_cast<uint32_t>(framesPerPacket_), std::memory_order_acq_rel);
+    const auto encodeStart = std::chrono::steady_clock::now();
     const int encodedBytes = enc_.EncodePacket(staging_.data(), encoderBurst_.data(),
                                                static_cast<int>(encoderBurst_.size()));
+    const uint64_t encodeUs = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - encodeStart).count());
+    encodeDurationLastUs_.store(encodeUs, std::memory_order_relaxed);
+    uint64_t encodeMax = encodeDurationMaxUs_.load(std::memory_order_relaxed);
+    while (encodeUs > encodeMax &&
+           !encodeDurationMaxUs_.compare_exchange_weak(
+               encodeMax, encodeUs, std::memory_order_relaxed, std::memory_order_relaxed)) {}
     UpdateEncoderSnapshot();
 
     if (encodedBytes < 0)
     {
+      ReleaseSemaphore(queueSpaceSemaphore_, 1, nullptr);
       encoderPendingFrames_.fetch_sub(static_cast<uint32_t>(framesPerPacket_), std::memory_order_acq_rel);
       failed_.store(true, std::memory_order_release);
       running_.store(false, std::memory_order_release);
@@ -443,17 +478,31 @@ void WasapiPassthrough::EncoderThreadProc()
       std::memcpy(encoderBurst_.data(), silenceBurst_.data(), burstBytes_);
     }
 
+    if (!running_.load(std::memory_order_relaxed))
     {
-      std::lock_guard<std::mutex> lock(queueMutex_);
-      if (!running_.load(std::memory_order_relaxed))
-      {
-        encoderPendingFrames_.fetch_sub(static_cast<uint32_t>(framesPerPacket_), std::memory_order_acq_rel);
-        break;
-      }
-      const size_t offset = queueWriteIndex_ * kMaxBurstBytes;
-      std::memcpy(queuedBursts_.data() + offset, encoderBurst_.data(), burstBytes_);
-      queueWriteIndex_ = (queueWriteIndex_ + 1) % kEncodedQueueCapacity;
-      ++queueCount_;
+      ReleaseSemaphore(queueSpaceSemaphore_, 1, nullptr);
+      encoderPendingFrames_.fetch_sub(static_cast<uint32_t>(framesPerPacket_), std::memory_order_acq_rel);
+      break;
+    }
+    // Space was checked before encoding. Only the consumer can free queue slots, so a
+    // push failure is an invariant violation rather than a recoverable full-queue case.
+    if (!queuedBursts_.TryPush(encoderBurst_))
+    {
+      ReleaseSemaphore(queueSpaceSemaphore_, 1, nullptr);
+      encoderPendingFrames_.fetch_sub(static_cast<uint32_t>(framesPerPacket_), std::memory_order_acq_rel);
+      failed_.store(true, std::memory_order_release);
+      running_.store(false, std::memory_order_release);
+      if (diagnostics_) diagnostics_->outputWasapiErrors.fetch_add(1, std::memory_order_relaxed);
+      std::fprintf(stderr, "[WasapiPassthrough] SPSC encoded queue invariant failed.\n");
+      queueCv_.notify_all();
+      ring_->WakeWaiters();
+      if (stopEvent_) SetEvent(stopEvent_);
+      break;
+    }
+    {
+      // Pair startup notifications with its wait mutex; the real-time consumer never
+      // takes this mutex, so it cannot inherit encoder-side lock contention.
+      std::lock_guard<std::mutex> lock(queueWaitMutex_);
     }
     queueCv_.notify_all();
   }
@@ -462,7 +511,7 @@ void WasapiPassthrough::EncoderThreadProc()
 
 bool WasapiPassthrough::Start()
 {
-  if (!client_ || !render_ || !dataEvent_ || !stopEvent_)
+  if (!client_ || !render_ || !dataEvent_ || !stopEvent_ || !queueSpaceSemaphore_)
   {
     std::fprintf(stderr, "[WasapiPassthrough] Start requested before successful Init\n");
     return false;
@@ -476,20 +525,24 @@ bool WasapiPassthrough::Start()
   primed_ = false;
   burstOffsetFrames_ = static_cast<uint32_t>(framesPerPacket_);
   currentBurstHasAudio_ = false;
+  currentBurstPending_ = false;
+  currentBurstRemainingFramesSnapshot_.store(0, std::memory_order_relaxed);
+  encodeDurationLastUs_.store(0, std::memory_order_relaxed);
+  encodeDurationMaxUs_.store(0, std::memory_order_relaxed);
+  renderEventLastUs_.store(0, std::memory_order_relaxed);
+  renderEventMaxUs_.store(0, std::memory_order_relaxed);
   encoderPendingFrames_.store(0, std::memory_order_relaxed);
   pendingTrimFrames_.store(0, std::memory_order_relaxed);
-  {
-    std::lock_guard<std::mutex> lock(queueMutex_);
-    queueReadIndex_ = queueWriteIndex_ = queueCount_ = 0;
-  }
+  queuedBursts_.Reset();
 
   encoderThread_ = std::thread(&WasapiPassthrough::EncoderThreadProc, this);
   const size_t requiredBursts =
       std::max<size_t>(1, (bufferFrames_ + framesPerPacket_ - 1) / framesPerPacket_);
   {
-    std::unique_lock<std::mutex> lock(queueMutex_);
+    std::unique_lock<std::mutex> lock(queueWaitMutex_);
     queueCv_.wait_for(lock, std::chrono::milliseconds(120), [&] {
-      return queueCount_ >= requiredBursts || !running_.load(std::memory_order_relaxed);
+      return queuedBursts_.Size() >= requiredBursts ||
+             !running_.load(std::memory_order_relaxed);
     });
   }
   if (!running_.load(std::memory_order_relaxed))
@@ -504,6 +557,7 @@ bool WasapiPassthrough::Start()
   {
     failed_.store(true, std::memory_order_relaxed);
     running_.store(false, std::memory_order_relaxed);
+    if (stopEvent_) SetEvent(stopEvent_);
     if (diagnostics_) diagnostics_->outputWasapiErrors.fetch_add(1, std::memory_order_relaxed);
     std::fprintf(stderr, "[WasapiPassthrough] initial GetBuffer failed: %s\n", HrStr(hr).c_str());
     queueCv_.notify_all();
@@ -518,6 +572,7 @@ bool WasapiPassthrough::Start()
   {
     failed_.store(true, std::memory_order_relaxed);
     running_.store(false, std::memory_order_relaxed);
+    if (stopEvent_) SetEvent(stopEvent_);
     if (diagnostics_) diagnostics_->outputWasapiErrors.fetch_add(1, std::memory_order_relaxed);
     std::fprintf(stderr, "[WasapiPassthrough] initial ReleaseBuffer failed: %s\n", HrStr(hr).c_str());
     queueCv_.notify_all();
@@ -542,6 +597,7 @@ bool WasapiPassthrough::Start()
   {
     failed_.store(true, std::memory_order_relaxed);
     running_.store(false, std::memory_order_relaxed);
+    if (stopEvent_) SetEvent(stopEvent_);
     if (diagnostics_) diagnostics_->outputWasapiErrors.fetch_add(1, std::memory_order_relaxed);
     std::fprintf(stderr, "[WasapiPassthrough] client Start failed: %s\n", HrStr(hr).c_str());
     queueCv_.notify_all();
@@ -587,6 +643,14 @@ void WasapiPassthrough::Stop()
     if (ms)
     {
       ms->active = 0;
+      InterlockedExchange(&ms->encoderQueueBursts, 0);
+      InterlockedExchange(&ms->encoderPendingFrames, 0);
+      InterlockedExchange(&ms->currentBurstRemainingFrames, 0);
+      InterlockedExchange(&ms->renderBufferFrames, 0);
+      InterlockedExchange64(&ms->encodeDurationLastUs, 0);
+      InterlockedExchange64(&ms->encodeDurationMaxUs, 0);
+      InterlockedExchange64(&ms->renderEventLastUs, 0);
+      InterlockedExchange64(&ms->renderEventMaxUs, 0);
       InterlockedExchange(&ms->surroundFilterState, 0);
       InterlockedExchange(&ms->surroundFilterHopFrames, 0);
       InterlockedExchange64(&ms->surroundFilterFifoFrames, 0);
@@ -600,6 +664,7 @@ void WasapiPassthrough::Stop()
   dev_.Reset();
   if (dataEvent_) { CloseHandle(dataEvent_); dataEvent_ = nullptr; }
   if (stopEvent_) { CloseHandle(stopEvent_); stopEvent_ = nullptr; }
+  if (queueSpaceSemaphore_) { CloseHandle(queueSpaceSemaphore_); queueSpaceSemaphore_ = nullptr; }
 }
 
 void WasapiPassthrough::UpdateEncoderSnapshot()
@@ -625,6 +690,21 @@ void WasapiPassthrough::PublishDiagnostics()
       static_cast<LONG64>(filterFifoSnapshot_.load(std::memory_order_relaxed)));
   InterlockedExchange(&state->surroundFilterTargetFrames,
       static_cast<LONG>(filterTargetSnapshot_.load(std::memory_order_relaxed)));
+  InterlockedExchange(&state->encoderQueueBursts,
+      static_cast<LONG>(queuedBursts_.Size()));
+  InterlockedExchange(&state->encoderPendingFrames,
+      static_cast<LONG>(encoderPendingFrames_.load(std::memory_order_relaxed)));
+  InterlockedExchange(&state->currentBurstRemainingFrames,
+      static_cast<LONG>(currentBurstRemainingFramesSnapshot_.load(std::memory_order_relaxed)));
+  InterlockedExchange(&state->renderBufferFrames, static_cast<LONG>(bufferFrames_));
+  InterlockedExchange64(&state->encodeDurationLastUs,
+      static_cast<LONG64>(encodeDurationLastUs_.load(std::memory_order_relaxed)));
+  InterlockedExchange64(&state->encodeDurationMaxUs,
+      static_cast<LONG64>(encodeDurationMaxUs_.load(std::memory_order_relaxed)));
+  InterlockedExchange64(&state->renderEventLastUs,
+      static_cast<LONG64>(renderEventLastUs_.load(std::memory_order_relaxed)));
+  InterlockedExchange64(&state->renderEventMaxUs,
+      static_cast<LONG64>(renderEventMaxUs_.load(std::memory_order_relaxed)));
 }
 
 void WasapiPassthrough::ThreadProc()
@@ -669,6 +749,7 @@ void WasapiPassthrough::ThreadProc()
       break;
     }
     consecutiveTimeouts = 0;
+    const auto renderEventStart = std::chrono::steady_clock::now();
 
     if (primed_)
     {
@@ -718,6 +799,14 @@ void WasapiPassthrough::ThreadProc()
       std::fprintf(stderr, "[WasapiPassthrough] ReleaseBuffer failed: %s\n", HrStr(hr).c_str());
       break;
     }
+    const uint64_t renderUs = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - renderEventStart).count());
+    renderEventLastUs_.store(renderUs, std::memory_order_relaxed);
+    uint64_t renderMax = renderEventMaxUs_.load(std::memory_order_relaxed);
+    while (renderUs > renderMax &&
+           !renderEventMaxUs_.compare_exchange_weak(
+               renderMax, renderUs, std::memory_order_relaxed, std::memory_order_relaxed)) {}
 
     if (sharedMem_.IsOpen())
     {

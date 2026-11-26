@@ -136,6 +136,7 @@ enable_testing()
 add_executable(unit_tests
   test/tests_main.cpp
   test/test_ringbuffer.cpp
+  test/test_spscqueue.cpp
   test/test_encoder.cpp
   test/test_upmix.cpp
 )
