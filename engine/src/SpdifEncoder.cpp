@@ -257,10 +257,12 @@ bool SpdifEncoder::Init(const Params& p)
   dualStereo_ = (p.upmix == Upmix::DualStereo);
   // Dual Stereo intentionally bypasses the FFT-based surround filter and uses only
   // direct planar channel copies after the normal PCM -> 5.1 sample-format conversion.
-  const bool wantUpmix = (p.upmix != Upmix::Off && !dualStereo_ &&
-                          p.upmix != Upmix::TimeDomain);
+  const bool isTimeDomain = (p.upmix == Upmix::TimeDomain ||
+                             p.upmix == Upmix::TimeDomainNative51);
+  const bool wantUpmix = (p.upmix != Upmix::Off && !dualStereo_ && !isTimeDomain);
   alwaysUpmix_ = (p.upmix == Upmix::Always || p.upmix == Upmix::AlwaysFront);
-  timeDomain_ = (p.upmix == Upmix::TimeDomain);
+  timeDomain_ = isTimeDomain;
+  timeDomainNative51_ = (p.upmix == Upmix::TimeDomainNative51);
   lfeFilterState_ = 0.0f;
   useFilter_ = (wantUpmix && inLayout_.nb_channels <= 2);
   dynamicUpmix_ = (wantUpmix && inLayout_.nb_channels > 2);
@@ -376,6 +378,7 @@ void SpdifEncoder::Close()
   useFilter_ = false;
   useDts_ = false;
   timeDomain_ = false;
+  timeDomainNative51_ = false;
   lfeFilterState_ = 0.0f;
   dynamicUpmix_ = false;
   alwaysUpmix_ = false;
@@ -654,7 +657,11 @@ int SpdifEncoder::EncodePacket(const uint8_t* in, uint8_t* outBuf, int outSize)
         std::memset(frame_->extended_data[ch] + static_cast<size_t>(got) * sizeof(float),
                     0, tailBytes);
     }
-    const bool stereoSource = (inLayout_.nb_channels <= 2) || IsEffectivelyStereo(in);
+    // Legacy TimeDomain mode also matrix-upmixes a multichannel endpoint when its
+    // current content is effectively stereo. The strict variant intentionally does
+    // not infer stereo from a 5.1 layout: any multichannel input bypasses the matrix.
+    const bool stereoSource = (inLayout_.nb_channels <= 2) ||
+        (!timeDomainNative51_ && IsEffectivelyStereo(in));
     if (stereoSource)
       ApplyTimeDomainUpmix();
   }
