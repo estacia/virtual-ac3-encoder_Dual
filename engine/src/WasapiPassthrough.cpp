@@ -172,6 +172,13 @@ bool WasapiPassthrough::Init(IMMDevice* dev, RingBuffer* ring, const CaptureForm
                  silenceBytes);
     return false;
   }
+  queueSpaceEvent_ = CreateEventW(nullptr, TRUE, TRUE, nullptr);
+  if (!queueSpaceEvent_)
+  {
+    std::fprintf(stderr, "[WasapiPassthrough] failed to create queue-space event (%lu).\\n",
+                 GetLastError());
+    return false;
+  }
   burstOffsetFrames_ = static_cast<uint32_t>(framesPerPacket_);
   UpdateEncoderSnapshot();
   sharedMem_.OpenProducer();
@@ -312,7 +319,7 @@ bool WasapiPassthrough::FillRenderBuffer(BYTE* out)
         currentBurstHasAudio_ = true;
         currentBurstPending_ = true;
         primed_ = true;
-        queueCv_.notify_one();
+        if (queueSpaceEvent_) SetEvent(queueSpaceEvent_);
       }
       else
       {
@@ -364,12 +371,24 @@ void WasapiPassthrough::EncoderThreadProc()
 
   while (running_.load(std::memory_order_relaxed))
   {
+    while (running_.load(std::memory_order_relaxed) &&
+           queuedBursts_.Size() >= kEncodedQueueCapacity)
     {
-      std::unique_lock<std::mutex> lock(queueWaitMutex_);
-      queueCv_.wait(lock, [&] {
-        return queuedBursts_.Size() < kEncodedQueueCapacity ||
-               !running_.load(std::memory_order_relaxed);
-      });
+      if (queueSpaceEvent_) ResetEvent(queueSpaceEvent_);
+      // Recheck after ResetEvent to avoid losing a concurrent consumer wakeup.
+      if (queuedBursts_.Size() < kEncodedQueueCapacity) break;
+      if (!queueSpaceEvent_ ||
+          WaitForSingleObject(queueSpaceEvent_, INFINITE) != WAIT_OBJECT_0)
+      {
+        if (running_.load(std::memory_order_relaxed))
+        {
+          failed_.store(true, std::memory_order_release);
+          running_.store(false, std::memory_order_release);
+          if (diagnostics_) diagnostics_->outputWasapiErrors.fetch_add(1, std::memory_order_relaxed);
+          if (stopEvent_) SetEvent(stopEvent_);
+        }
+        break;
+      }
     }
     if (!running_.load(std::memory_order_relaxed)) break;
 
@@ -466,6 +485,11 @@ void WasapiPassthrough::EncoderThreadProc()
       ring_->WakeWaiters();
       if (stopEvent_) SetEvent(stopEvent_);
       break;
+    }
+    {
+      // Pair startup notifications with its wait mutex; the real-time consumer never
+      // takes this mutex, so it cannot inherit encoder-side lock contention.
+      std::lock_guard<std::mutex> lock(queueWaitMutex_);
     }
     queueCv_.notify_all();
   }
@@ -590,6 +614,7 @@ void WasapiPassthrough::Stop()
   running_.store(false, std::memory_order_release);
   if (stopEvent_) SetEvent(stopEvent_);
   queueCv_.notify_all();
+  if (queueSpaceEvent_) SetEvent(queueSpaceEvent_);
   if (ring_) ring_->WakeWaiters();
 
   if (thread_.joinable()) thread_.join();
@@ -616,6 +641,7 @@ void WasapiPassthrough::Stop()
   dev_.Reset();
   if (dataEvent_) { CloseHandle(dataEvent_); dataEvent_ = nullptr; }
   if (stopEvent_) { CloseHandle(stopEvent_); stopEvent_ = nullptr; }
+  if (queueSpaceEvent_) { CloseHandle(queueSpaceEvent_); queueSpaceEvent_ = nullptr; }
 }
 
 void WasapiPassthrough::UpdateEncoderSnapshot()
