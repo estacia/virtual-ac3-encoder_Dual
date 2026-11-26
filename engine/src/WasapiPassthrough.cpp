@@ -222,8 +222,6 @@ bool WasapiPassthrough::InitExclusive(int rate)
   HR_FAIL(client_->GetDevicePeriod(&defaultPeriod, &minimumExclusivePeriod), "GetDevicePeriod");
   if (minimumExclusivePeriod <= 0) minimumExclusivePeriod = defaultPeriod;
 
-  const REFERENCE_TIME burstHns =
-      static_cast<REFERENCE_TIME>(10000000.0 * framesPerPacket_ / rate + 0.5);
   auto framesToHns = [rate](UINT32 frames) -> REFERENCE_TIME {
     return static_cast<REFERENCE_TIME>(10000000.0 * frames / rate + 0.5);
   };
