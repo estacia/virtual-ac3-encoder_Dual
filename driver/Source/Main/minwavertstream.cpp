@@ -533,8 +533,11 @@ NTSTATUS CMiniportWaveRTStream::AllocateBufferWithNotification
     m_ulDmaBufferSize = RequestedSize_;
     {
         const ULONGLONG packetBytes = RequestedSize_ / NotificationCount_;
+        // Round up to the next 100-ns tick so the callback cannot announce
+        // a packet before its final PCM byte has reached the simulated play head.
         m_ullNotificationIntervalHns =
-            (packetBytes * 10000000ULL) / m_ulDmaMovementRate;
+            ((packetBytes * 10000000ULL) + m_ulDmaMovementRate - 1) /
+            m_ulDmaMovementRate;
         if (m_ullNotificationIntervalHns == 0)
         {
             m_ullNotificationIntervalHns = 1;
@@ -574,6 +577,8 @@ VOID CMiniportWaveRTStream::FreeBufferWithNotification
     
     m_ulDmaBufferSize = 0;
     m_ulNotificationsPerBuffer = 0;
+    m_ullNotificationIntervalHns = 0;
+    m_ullByteFractionCarryForward = 0;
 
     return;
 }
@@ -723,6 +728,8 @@ _In_        ULONG       Size_
 
     m_ulDmaBufferSize = 0;
     m_ulNotificationsPerBuffer = 0;
+    m_ullNotificationIntervalHns = 0;
+    m_ullByteFractionCarryForward = 0;
 }
 
 //=============================================================================
@@ -895,7 +902,10 @@ NTSTATUS CMiniportWaveRTStream::GetReadPacket
     // 1 from the packet counter to compute the time at the start of that last completed packet.
     ULONGLONG linearPositionOfAvailablePacket = packetCounter * (m_ulDmaBufferSize / m_ulNotificationsPerBuffer);
     // Need to divide by (1000 * 10000 because m_ulDmaMovementRate is average bytes per sec
-    ULONGLONG deltaLinearPosition = ullLinearPosition - linearPositionOfAvailablePacket;
+    ULONGLONG deltaLinearPosition =
+        (ullLinearPosition >= linearPositionOfAvailablePacket)
+            ? (ullLinearPosition - linearPositionOfAvailablePacket)
+            : 0ULL;
     ULONGLONG fractionalByteTimeInHns =
         (m_ulDmaMovementRate != 0) ? (byteFractionCarryForward / m_ulDmaMovementRate) : 0;
     ULONGLONG deltaTimeInHns =
@@ -1539,7 +1549,6 @@ TimerNotifyRT
 )
 {
     LARGE_INTEGER qpc;
-    LARGE_INTEGER qpcFrequency;
     BOOL bufferCompleted = FALSE;
     ULONGLONG completedPeriods = 0;
 
@@ -1555,7 +1564,7 @@ TimerNotifyRT
     KIRQL oldIrql;
     KeAcquireSpinLock(&_this->m_PositionSpinLock, &oldIrql);
 
-    qpc = KeQueryPerformanceCounter(&qpcFrequency);
+    qpc = KeQueryPerformanceCounter(NULL);
     LONGLONG nowHns = KSCONVERT_PERFORMANCE_TIME(
         _this->m_ullPerformanceCounterFrequency.QuadPart, qpc);
     const ULONGLONG intervalHns = _this->m_ullNotificationIntervalHns;
