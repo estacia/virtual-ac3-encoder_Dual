@@ -1120,6 +1120,9 @@ TEST_CASE("4.0 speaker layout: Dual Stereo Copy keeps stereo copy behavior uncha
 
 TEST_CASE("4.0 layout: Dynamic and Always Surround stereo upmix keep four speakers and omit synthetic C/LFE")
 {
+  const std::vector<double> baseline =
+      EncodeTimeDomainNative51Rms(false, false, SpdifEncoder::Upmix::Off);
+  REQUIRE(baseline.size() >= 6);
   for (const auto mode : {SpdifEncoder::Upmix::Surround, SpdifEncoder::Upmix::Always})
   {
     SpdifEncoder::FilterStatus status = SpdifEncoder::FilterStatus::Disabled;
@@ -1130,14 +1133,17 @@ TEST_CASE("4.0 layout: Dynamic and Always Surround stereo upmix keep four speake
     CHECK(rms[1] > 0.03);
     CHECK(rms[2] < 0.005);
     CHECK(rms[3] < 0.005);
-    CHECK(rms[4] > 0.01);
-    CHECK(rms[5] > 0.01);
+    CHECK(rms[4] > baseline[4] + 0.001);
+    CHECK(rms[5] > baseline[5] + 0.001);
     CHECK(status == SpdifEncoder::FilterStatus::SpeakerLayout4_0Upmix);
   }
 }
 
 TEST_CASE("4.0 layout: Dynamic and Always Surround upmix stereo carried by a 5.1 endpoint")
 {
+  const std::vector<double> baseline =
+      EncodeTimeDomainNative51Rms(true, false, SpdifEncoder::Upmix::Off);
+  REQUIRE(baseline.size() >= 6);
   for (const auto mode : {SpdifEncoder::Upmix::Surround, SpdifEncoder::Upmix::Always})
   {
     SpdifEncoder::FilterStatus status = SpdifEncoder::FilterStatus::Disabled;
@@ -1148,8 +1154,8 @@ TEST_CASE("4.0 layout: Dynamic and Always Surround upmix stereo carried by a 5.1
     CHECK(rms[1] > 0.03);
     CHECK(rms[2] < 0.005);
     CHECK(rms[3] < 0.005);
-    CHECK(rms[4] > 0.01);
-    CHECK(rms[5] > 0.01);
+    CHECK(rms[4] > baseline[4] + 0.001);
+    CHECK(rms[5] > baseline[5] + 0.001);
     CHECK(status == SpdifEncoder::FilterStatus::SpeakerLayout4_0Upmix);
   }
 }
