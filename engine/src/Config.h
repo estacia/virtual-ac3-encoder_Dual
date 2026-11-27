@@ -70,4 +70,5 @@ struct Config
   std::string outputMode = "ac3";
   int64_t dtsBitRate = 1536000; // DTS Core: 1536000 (full-rate 1.5 Mbps) or 768000 (half-rate)
   std::string upmix = "surround";
+  bool speakerLayout4_0 = true; // no Center/Sub: redirect native C/LFE into Front L/R for selected modes
 };
