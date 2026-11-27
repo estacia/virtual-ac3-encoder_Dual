@@ -46,6 +46,7 @@ public:
     TimeDomainWaiting = 6,
     TimeDomainMatrix = 7,
     TimeDomainNativeBypass = 8,
+    SpeakerLayout4_0FoldDown = 9,
   };
 
   static constexpr int kSurroundFilterHopFrames = 2048;
@@ -89,6 +90,7 @@ public:
     AVChannelLayout inLayout{};                     // caller-owned; copied in Init().
                                                     // Any layout; downmixed to 5.1 by swr.
     Upmix upmix = Upmix::Off;                       // stereo->5.1 upmix mode
+    bool foldDownCenterLfeToFront = false;          // 4.0 layout: fold native Center + LFE into FL/FR
     int surroundWindowSize = 4096;                  // FFmpeg surround FFT window (1024 for Extreme)
   };
 
@@ -137,6 +139,7 @@ private:
   int  EncodeFrameToBurst(uint8_t* outBuf, int outSize);
   void ApplyChannelGainsAndComputeLevels(AVFrame* target);
   void ApplyTimeDomainUpmix(AVFrame* target);
+  void ApplyCenterLfeFoldDown(AVFrame* target);
 
   // Dynamic upmix helpers: detect stereo content in a multichannel stream and extract FL+FR.
   // Detect stereo content inside a multichannel endpoint. The strict Native 5.1
@@ -168,6 +171,9 @@ private:
   bool             timeDomainNative51_ = false; // content-aware native-channel protection with lower detection threshold
   bool             timeDomainMatrixDetected_ = false;
   bool             timeDomainMatrixApplied_ = false;
+  bool             foldDownCenterLfeToFront_ = false;
+  bool             speakerFoldDownActive_ = false;
+  float            foldDownLimiterGain_ = 1.0f;
   float            lfeFilterState_ = 0.0f;
   AVFilterGraph*   graph_     = nullptr;
   AVFilterContext* fsrc_      = nullptr; // abuffer
