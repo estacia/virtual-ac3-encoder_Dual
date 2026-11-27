@@ -90,7 +90,7 @@ int g_ac3Bitrate = 0; // 0=640k, 1=448k
 int g_latencyPreset = 2; // 0=Extreme, 1=Fast, 2=Balanced, 3=Safe, 4=Relaxed
 int g_safeFrames = 128;
 bool g_useCustomSafeFrames = false;
-int g_upmixMode = 0; // 0=Dynamic Surround, 6=Dual Stereo Copy, 7=Off
+int g_upmixMode = 0; // 0=Dynamic, 6=Dual Stereo, 7=Off, 8=Time-domain Matrix, 9=Matrix + Native 5.1 Untouched
 bool g_loopback = true;
 bool g_outAutoSpdif = true;
 int  g_reloadId = 1;
