@@ -121,6 +121,7 @@ public:
   // Returns bytes written, 0 if the encoder produced no packet, <0 on error.
   int EncodePacket(const uint8_t* in, uint8_t* outBuf, int outSize);
   // Process one 256-sample PCM block. Returns 0 until a full codec frame is ready.
+  int EncodeChunk(const uint8_t* in, int inputFrames, uint8_t* outBuf, int outSize);
 
 private:
   // FFmpeg >= 6.1 AVIO write callback signature uses const uint8_t*.

@@ -79,6 +79,41 @@ TEST_CASE("encode: 5.1 float -> 6144-byte IEC 61937 burst")
   CHECK(HasIec61937Sync(out.data()));
 }
 
+TEST_CASE("incremental DSP: six 256-sample blocks form one AC-3 frame")
+{
+  SpdifEncoder enc;
+  REQUIRE(InitFor(enc, 6, AV_SAMPLE_FMT_FLT));
+  REQUIRE(enc.FramesPerPacket() == 1536);
+  std::vector<float> input(static_cast<size_t>(SpdifEncoder::kPcmChunkFrames) * 6 * 6, 0.0f);
+  for (size_t i = 0; i < input.size(); i += 6)
+  {
+    input[i + 0] = 0.25f;
+    input[i + 1] = -0.25f;
+  }
+
+  std::vector<uint8_t> out(SpdifEncoder::kMaxBytesPerPacket);
+  for (int block = 0; block < 6; ++block)
+  {
+    const uint8_t* blockData = reinterpret_cast<const uint8_t*>(
+        input.data() + static_cast<size_t>(block) * SpdifEncoder::kPcmChunkFrames * 6);
+    const int n = enc.EncodeChunk(blockData, SpdifEncoder::kPcmChunkFrames,
+                                  out.data(), static_cast<int>(out.size()));
+    if (block < 5)
+      CHECK(n == 0);
+    else
+    {
+      CHECK(n == 6144);
+      CHECK(HasIec61937Sync(out.data()));
+    }
+  }
+
+  float peaks[6] = {};
+  float rms[6] = {};
+  enc.GetChannelLevels(peaks, rms);
+  CHECK(peaks[0] == doctest::Approx(0.25f).epsilon(0.01f));
+  CHECK(peaks[1] == doctest::Approx(0.25f).epsilon(0.01f));
+}
+
 TEST_CASE("encode: 7.1 input is downmixed to 5.1")
 {
   SpdifEncoder enc;
