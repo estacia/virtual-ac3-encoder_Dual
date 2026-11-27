@@ -43,6 +43,9 @@ public:
     Warming = 3,
     NativeBypass = 4,
     HoldPrewarm = 5,
+    TimeDomainWaiting = 6,
+    TimeDomainMatrix = 7,
+    TimeDomainNativeBypass = 8,
   };
 
   static constexpr int kSurroundFilterHopFrames = 2048;
@@ -163,6 +166,8 @@ private:
   bool             useDts_ = false;
   bool             timeDomain_ = false;
   bool             timeDomainNative51_ = false; // content-aware native-channel protection with lower detection threshold
+  bool             timeDomainMatrixDetected_ = false;
+  bool             timeDomainMatrixApplied_ = false;
   float            lfeFilterState_ = 0.0f;
   AVFilterGraph*   graph_     = nullptr;
   AVFilterContext* fsrc_      = nullptr; // abuffer
