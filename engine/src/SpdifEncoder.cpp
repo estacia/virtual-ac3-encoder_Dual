@@ -715,7 +715,9 @@ int SpdifEncoder::EncodeChunk(const uint8_t* in, int inputFrames,
     // activity so real 5.1 is preserved and only its missing-speaker channels fold down.
     bool detectedStereo = true;
     if (!alwaysUpmix_ || foldDownCenterLfeToFront_)
-      detectedStereo = IsEffectivelyStereo(in, inputFrames, &hasDiscreteActivity);
+      detectedStereo = IsEffectivelyStereo(
+          in, inputFrames, &hasDiscreteActivity,
+          foldDownCenterLfeToFront_ ? 0.0001 : 0.0005);
     const bool stereoSource = alwaysUpmix_ || detectedStereo;
 
     // In 4.0 mode, even Always Surround preserves a genuine multichannel source
