@@ -46,6 +46,8 @@ void SpdifEncoder::GetChannelLevels(float outPeaks[6], float outRms[6]) const
 
 SpdifEncoder::FilterStatus SpdifEncoder::GetFilterStatus() const
 {
+  if (speakerFoldDownActive_)
+    return FilterStatus::SpeakerLayout4_0FoldDown;
   if (timeDomain_)
   {
     if (!timeDomainMatrixDetected_)
@@ -124,6 +126,59 @@ void SpdifEncoder::ApplyTimeDomainUpmix(AVFrame* target)
     lfeFilterState_ += alpha * (mid - lfeFilterState_);
     lfe[i] = lfeFilterState_ * 0.31622777f;
   }
+}
+
+void SpdifEncoder::ApplyCenterLfeFoldDown(AVFrame* target)
+{
+  if (!target || !target->extended_data || !codecCtx_ ||
+      codecCtx_->ch_layout.nb_channels < 6)
+    return;
+
+  float* fl  = reinterpret_cast<float*>(target->extended_data[0]);
+  float* fr  = reinterpret_cast<float*>(target->extended_data[1]);
+  float* fc  = reinterpret_cast<float*>(target->extended_data[2]);
+  float* lfe = reinterpret_cast<float*>(target->extended_data[3]);
+  if (!fl || !fr || !fc || !lfe)
+    return;
+
+  // ITU-R BS.775-4 phantom-center fold-down: C is sent to L/R at -3 dB each.
+  constexpr float kCenterToFront = 0.70710678f;
+  // ITU-R BS.775-4 LFE redirection: +10 dB reproduction compensation, then
+  // -6 dB to each of the two front speakers. Net coefficient per front = +4 dB.
+  constexpr float kLfeToEachFront = 1.58489319f;
+  constexpr float kPeakCeiling = 0.95f;
+
+  float peak = 0.0f;
+  for (int i = 0; i < target->nb_samples; ++i)
+  {
+    fl[i] += kCenterToFront * fc[i] + kLfeToEachFront * lfe[i];
+    fr[i] += kCenterToFront * fc[i] + kLfeToEachFront * lfe[i];
+    peak = std::max(peak, std::max(std::fabs(fl[i]), std::fabs(fr[i])));
+  }
+
+  // These channels no longer exist in a 4.0 speaker layout. Clearing them avoids
+  // duplicate playback on a downstream device that still advertises a 5.1 bitstream.
+  std::fill_n(fc, target->nb_samples, 0.0f);
+  std::fill_n(lfe, target->nb_samples, 0.0f);
+
+  // Prevent summed center/LFE peaks from overloading the AC-3/DTS encoder. Attack
+  // is immediate; release is smoothed over 50 ms to avoid rapid block-to-block gain
+  // jumps. No look-ahead, queue, or additional buffering is introduced.
+  const float targetGain = (peak > kPeakCeiling) ? (kPeakCeiling / peak) : 1.0f;
+  const float release = 1.0f - std::exp(
+      -static_cast<float>(target->nb_samples) /
+      (0.050f * static_cast<float>(std::max(1, sampleRate_))));
+  for (int i = 0; i < target->nb_samples; ++i)
+  {
+    if (targetGain < foldDownLimiterGain_)
+      foldDownLimiterGain_ = targetGain;
+    else
+      foldDownLimiterGain_ += release * (targetGain - foldDownLimiterGain_);
+    fl[i] *= foldDownLimiterGain_;
+    fr[i] *= foldDownLimiterGain_;
+  }
+
+  speakerFoldDownActive_ = true;
 }
 
 void SpdifEncoder::ApplyChannelGainsAndComputeLevels(AVFrame* target)
@@ -282,6 +337,10 @@ bool SpdifEncoder::Init(const Params& p)
   timeDomainNative51_ = (p.upmix == Upmix::TimeDomainNative51);
   timeDomainMatrixDetected_ = false;
   timeDomainMatrixApplied_ = false;
+  foldDownCenterLfeToFront_ = p.foldDownCenterLfeToFront &&
+      (p.upmix == Upmix::TimeDomainNative51 || p.upmix == Upmix::DualStereo);
+  speakerFoldDownActive_ = false;
+  foldDownLimiterGain_ = 1.0f;
   lfeFilterState_ = 0.0f;
   useFilter_ = (wantUpmix && inLayout_.nb_channels <= 2);
   dynamicUpmix_ = (wantUpmix && inLayout_.nb_channels > 2);
@@ -402,6 +461,9 @@ void SpdifEncoder::Close()
   timeDomainNative51_ = false;
   timeDomainMatrixDetected_ = false;
   timeDomainMatrixApplied_ = false;
+  foldDownCenterLfeToFront_ = false;
+  speakerFoldDownActive_ = false;
+  foldDownLimiterGain_ = 1.0f;
   lfeFilterState_ = 0.0f;
   dynamicUpmix_ = false;
   alwaysUpmix_ = false;
@@ -605,6 +667,8 @@ int SpdifEncoder::EncodeChunk(const uint8_t* in, int inputFrames,
 
   bool usedUpmixFilter = false;
   bool haveProcessedChunk = false;
+  bool foldDownNativeChannels = false;
+  speakerFoldDownActive_ = false;
 
   auto convertDirect = [&](SwrContext* converter) -> bool {
     if (!converter || av_frame_make_writable(chunkFrame_) < 0) return false;
@@ -705,7 +769,24 @@ int SpdifEncoder::EncodeChunk(const uint8_t* in, int inputFrames,
         IsEffectivelyStereo(in, inputFrames, nullptr, nativeProtectionThreshold);
     timeDomainMatrixDetected_ = true;
     timeDomainMatrixApplied_ = stereoSource;
-    if (stereoSource) ApplyTimeDomainUpmix(chunkFrame_);
+    if (stereoSource)
+    {
+      ApplyTimeDomainUpmix(chunkFrame_);
+      // The Time-domain matrix derives C and LFE from the original stereo.
+      // With no Center/Sub speakers, omit these duplicates: FL/FR already retain
+      // the complete original signal and the difference-derived rears remain active.
+      if (foldDownCenterLfeToFront_ && codecCtx_->ch_layout.nb_channels >= 6)
+      {
+        std::fill_n(reinterpret_cast<float*>(chunkFrame_->extended_data[2]), inputFrames, 0.0f);
+        std::fill_n(reinterpret_cast<float*>(chunkFrame_->extended_data[3]), inputFrames, 0.0f);
+      }
+    }
+    else if (foldDownCenterLfeToFront_)
+    {
+      // This is genuine multichannel content. Fold only its native C/LFE channels;
+      // preserve FL/FR and SL/SR as discrete channels.
+      foldDownNativeChannels = true;
+    }
     haveProcessedChunk = true;
   }
   else if (dualStereoSwr_)
@@ -760,10 +841,17 @@ int SpdifEncoder::EncodeChunk(const uint8_t* in, int inputFrames,
       std::memset(fc, 0, bytes);
       std::memset(lfe, 0, bytes);
     }
+    else if (foldDownCenterLfeToFront_)
+    {
+      foldDownNativeChannels = true;
+    }
     haveProcessedChunk = true;
   }
 
   if (!haveProcessedChunk) return 0;
+
+  if (foldDownNativeChannels)
+    ApplyCenterLfeFoldDown(chunkFrame_);
 
   if (usedUpmixFilter && codecCtx_->ch_layout.nb_channels >= 6)
   {

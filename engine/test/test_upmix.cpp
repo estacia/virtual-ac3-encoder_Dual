@@ -158,12 +158,13 @@ std::vector<double> AntiPhaseSurroundRms(SpdifEncoder::Upmix mode)
 }
 
 
-std::vector<double> EncodeDualStereoRms(bool input51, bool native51)
+std::vector<double> EncodeDualStereoRms(bool input51, bool native51, bool foldDown4_0 = false)
 {
   SpdifEncoder::Params p;
   p.sampleRate = 48000;
   p.inSampleFmt = AV_SAMPLE_FMT_FLT;
   p.upmix = SpdifEncoder::Upmix::DualStereo;
+  p.foldDownCenterLfeToFront = foldDown4_0;
   if (input51)
   {
     AVChannelLayout lay51 = AV_CHANNEL_LAYOUT_5POINT1_BACK;
@@ -209,12 +210,14 @@ std::vector<double> EncodeDualStereoRms(bool input51, bool native51)
 
 std::vector<double> EncodeTimeDomainNative51Rms(bool input51, bool native51, SpdifEncoder::Upmix mode,
                                                 float discreteScale = 1.0f,
-                                                SpdifEncoder::FilterStatus* finalStatus = nullptr)
+                                                SpdifEncoder::FilterStatus* finalStatus = nullptr,
+                                                bool foldDown4_0 = false)
 {
   SpdifEncoder::Params p;
   p.sampleRate = 48000;
   p.inSampleFmt = AV_SAMPLE_FMT_FLT;
   p.upmix = mode;
+  p.foldDownCenterLfeToFront = foldDown4_0;
   if (input51)
   {
     AVChannelLayout lay51 = AV_CHANNEL_LAYOUT_5POINT1_BACK;
@@ -253,6 +256,45 @@ std::vector<double> EncodeTimeDomainNative51Rms(bool input51, bool native51, Spd
     const int n = enc.EncodePacket(reinterpret_cast<uint8_t*>(in.data()), out.data(),
                                    static_cast<int>(out.size()));
     if (n > 0) stream.insert(stream.end(), out.data(), out.data() + n);
+  }
+  if (finalStatus)
+    *finalStatus = enc.GetFilterStatus();
+  REQUIRE(stream.size() > static_cast<size_t>(6144) * 4);
+  return DecodeSpdifAc3Rms(stream.data(), static_cast<int>(stream.size()));
+}
+
+std::vector<double> EncodeSingleNative51ChannelRms(SpdifEncoder::Upmix mode, int activeChannel,
+                                                         SpdifEncoder::FilterStatus* finalStatus = nullptr)
+{
+  SpdifEncoder::Params p;
+  p.sampleRate = 48000;
+  p.inSampleFmt = AV_SAMPLE_FMT_FLT;
+  p.upmix = mode;
+  p.foldDownCenterLfeToFront = true;
+  AVChannelLayout layout = AV_CHANNEL_LAYOUT_5POINT1_BACK;
+  av_channel_layout_copy(&p.inLayout, &layout);
+
+  SpdifEncoder enc;
+  const bool ok = enc.Init(p);
+  av_channel_layout_uninit(&p.inLayout);
+  REQUIRE(ok);
+
+  const int fpp = enc.FramesPerPacket();
+  std::vector<float> input(static_cast<size_t>(fpp) * 6, 0.0f);
+  std::vector<uint8_t> burst(SpdifEncoder::kMaxBytesPerPacket);
+  std::vector<uint8_t> stream;
+  for (int packet = 0; packet < 24; ++packet)
+  {
+    for (int i = 0; i < fpp; ++i)
+    {
+      const double t = static_cast<double>(packet * fpp + i) / 48000.0;
+      const double frequency = (activeChannel == 3) ? 70.0 : 660.0;
+      input[static_cast<size_t>(i) * 6 + activeChannel] =
+          0.22f * static_cast<float>(std::sin(2.0 * kPi * frequency * t));
+    }
+    const int bytes = enc.EncodePacket(reinterpret_cast<const uint8_t*>(input.data()),
+                                       burst.data(), static_cast<int>(burst.size()));
+    if (bytes > 0) stream.insert(stream.end(), burst.data(), burst.data() + bytes);
   }
   if (finalStatus)
     *finalStatus = enc.GetFilterStatus();
@@ -993,4 +1035,85 @@ TEST_CASE("time-domain matrix: discrete native 5.1 channels bypass stereo matrix
   REQUIRE(rms.size() >= 6);
   for (int channel = 0; channel < 6; ++channel)
     CHECK(rms[static_cast<size_t>(channel)] > 0.01);
+}
+
+TEST_CASE("4.0 speaker layout: native Center is redirected to Front L/R in both target modes")
+{
+  for (const auto mode : {SpdifEncoder::Upmix::TimeDomainNative51,
+                          SpdifEncoder::Upmix::DualStereo})
+  {
+    SpdifEncoder::FilterStatus status = SpdifEncoder::FilterStatus::Disabled;
+    const std::vector<double> rms = EncodeSingleNative51ChannelRms(mode, 2, &status);
+    REQUIRE(rms.size() >= 6);
+    CHECK(rms[0] > 0.03);
+    CHECK(rms[1] > 0.03);
+    CHECK(rms[2] < 0.005);
+    CHECK(rms[3] < 0.005);
+    CHECK(rms[4] < 0.005);
+    CHECK(rms[5] < 0.005);
+    CHECK(status == SpdifEncoder::FilterStatus::SpeakerLayout4_0FoldDown);
+  }
+}
+
+TEST_CASE("4.0 speaker layout: native LFE is redirected to Front L/R in both target modes")
+{
+  for (const auto mode : {SpdifEncoder::Upmix::TimeDomainNative51,
+                          SpdifEncoder::Upmix::DualStereo})
+  {
+    SpdifEncoder::FilterStatus status = SpdifEncoder::FilterStatus::Disabled;
+    const std::vector<double> rms = EncodeSingleNative51ChannelRms(mode, 3, &status);
+    REQUIRE(rms.size() >= 6);
+    CHECK(rms[0] > 0.03);
+    CHECK(rms[1] > 0.03);
+    CHECK(rms[2] < 0.005);
+    CHECK(rms[3] < 0.005);
+    CHECK(rms[4] < 0.005);
+    CHECK(rms[5] < 0.005);
+    CHECK(status == SpdifEncoder::FilterStatus::SpeakerLayout4_0FoldDown);
+  }
+}
+
+TEST_CASE("4.0 speaker layout: native 5.1 folds only Center/LFE and preserves Surrounds")
+{
+  const std::vector<double> baseline =
+      EncodeTimeDomainNative51Rms(true, true, SpdifEncoder::Upmix::Off);
+  SpdifEncoder::FilterStatus status = SpdifEncoder::FilterStatus::Disabled;
+  const std::vector<double> folded =
+      EncodeTimeDomainNative51Rms(true, true, SpdifEncoder::Upmix::TimeDomainNative51,
+                                  1.0f, &status, true);
+  REQUIRE(baseline.size() >= 6);
+  REQUIRE(folded.size() >= 6);
+  CHECK(folded[0] > baseline[0]);
+  CHECK(folded[1] > baseline[1]);
+  CHECK(folded[2] < 0.005);
+  CHECK(folded[3] < 0.005);
+  CHECK(std::fabs(folded[4] - baseline[4]) < 0.02);
+  CHECK(std::fabs(folded[5] - baseline[5]) < 0.02);
+  CHECK(status == SpdifEncoder::FilterStatus::SpeakerLayout4_0FoldDown);
+}
+
+TEST_CASE("4.0 speaker layout: Time-domain stereo matrix does not double-add synthetic Center/LFE")
+{
+  const std::vector<double> rms =
+      EncodeTimeDomainNative51Rms(true, false, SpdifEncoder::Upmix::TimeDomainNative51,
+                                  1.0f, nullptr, true);
+  REQUIRE(rms.size() >= 6);
+  CHECK(rms[0] > 0.03);
+  CHECK(rms[1] > 0.03);
+  CHECK(rms[2] < 0.005);
+  CHECK(rms[3] < 0.005);
+  CHECK(rms[4] > 0.03);
+  CHECK(rms[5] > 0.03);
+}
+
+TEST_CASE("4.0 speaker layout: Dual Stereo Copy keeps stereo copy behavior unchanged")
+{
+  const std::vector<double> rms = EncodeDualStereoRms(true, false, true);
+  REQUIRE(rms.size() >= 6);
+  CHECK(rms[0] > 0.03);
+  CHECK(rms[1] > 0.03);
+  CHECK(rms[2] < 0.005);
+  CHECK(rms[3] < 0.005);
+  CHECK(rms[4] > 0.03);
+  CHECK(rms[5] > 0.03);
 }

@@ -46,6 +46,7 @@ public:
     TimeDomainWaiting = 6,
     TimeDomainMatrix = 7,
     TimeDomainNativeBypass = 8,
+    SpeakerLayout4_0FoldDown = 9,
   };
 
   static constexpr int kSurroundFilterHopFrames = 2048;
@@ -65,6 +66,8 @@ public:
   // - Always: forces 5.1 surround upmixing unconditionally on all inputs
   // - AlwaysFront: forces 3.1 upmixing (Center + Sub/LFE) unconditionally on all inputs
   // - DualStereo: copies FL->SL and FR->SR for stereo content; native multichannel passes through.
+  // - In 4.0 speaker layout for DualStereo / TimeDomainNative51, native Center/LFE are folded
+  //   into FL/FR and cleared; stereo-derived Center/LFE are omitted to avoid double counting.
   enum class Upmix
   {
     Off,
@@ -76,7 +79,7 @@ public:
     AlwaysFront,  // Forced 3.1 on all audio
     DualStereo,   // Direct stereo copy: FL->SL, FR->SR; Center/LFE silent; native 5.1 untouched
     TimeDomain,   // Center/difference-rear + one-pole LFE; auto-detects stereo in multichannel input
-    TimeDomainNative51, // Same matrix for 2ch input; any multichannel input bypasses the matrix
+    TimeDomainNative51, // Content-aware matrix for stereo-in-5.1; native discrete channels are preserved
   };
 
   struct Params
@@ -89,6 +92,7 @@ public:
     AVChannelLayout inLayout{};                     // caller-owned; copied in Init().
                                                     // Any layout; downmixed to 5.1 by swr.
     Upmix upmix = Upmix::Off;                       // stereo->5.1 upmix mode
+    bool foldDownCenterLfeToFront = false;          // 4.0 layout: fold native Center + LFE into FL/FR
     int surroundWindowSize = 4096;                  // FFmpeg surround FFT window (1024 for Extreme)
   };
 
@@ -137,6 +141,7 @@ private:
   int  EncodeFrameToBurst(uint8_t* outBuf, int outSize);
   void ApplyChannelGainsAndComputeLevels(AVFrame* target);
   void ApplyTimeDomainUpmix(AVFrame* target);
+  void ApplyCenterLfeFoldDown(AVFrame* target);
 
   // Dynamic upmix helpers: detect stereo content in a multichannel stream and extract FL+FR.
   // Detect stereo content inside a multichannel endpoint. The strict Native 5.1
@@ -168,6 +173,9 @@ private:
   bool             timeDomainNative51_ = false; // content-aware native-channel protection with lower detection threshold
   bool             timeDomainMatrixDetected_ = false;
   bool             timeDomainMatrixApplied_ = false;
+  bool             foldDownCenterLfeToFront_ = false;
+  bool             speakerFoldDownActive_ = false;
+  float            foldDownLimiterGain_ = 1.0f;
   float            lfeFilterState_ = 0.0f;
   AVFilterGraph*   graph_     = nullptr;
   AVFilterContext* fsrc_      = nullptr; // abuffer

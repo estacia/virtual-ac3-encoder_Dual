@@ -138,6 +138,7 @@ bool WasapiPassthrough::Init(IMMDevice* dev, RingBuffer* ring, const CaptureForm
   ep.surroundWindowSize = params_.surroundWindowSize;
   ep.upmix = (params_.upmix != SpdifEncoder::Upmix::Off) ? params_.upmix
            : (params_.upmixSurround ? SpdifEncoder::Upmix::Surround : SpdifEncoder::Upmix::Off);
+  ep.foldDownCenterLfeToFront = params_.foldDownCenterLfeToFront;
   if (capFmt.channelMask) av_channel_layout_from_mask(&ep.inLayout, capFmt.channelMask);
   else av_channel_layout_default(&ep.inLayout, static_cast<int>(capFmt.channels));
 
