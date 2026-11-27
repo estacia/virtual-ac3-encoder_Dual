@@ -231,21 +231,32 @@ bool WasapiPassthrough::InitExclusive(int rate)
   };
   const UINT32 requestedFrames = std::clamp<UINT32>(
       params_.renderPeriodFrames, 64u, static_cast<UINT32>(std::max(64, framesPerPacket_)));
-  const REFERENCE_TIME preferredHns = std::max(minimumExclusivePeriod, framesToHns(requestedFrames));
+  // Try the endpoint's lowest practical exclusive period first, but avoid sub-128-frame
+  // callbacks on this worker-driven path. If rejected, retry the configured period, then
+  // fall back to a complete codec-burst buffer for endpoint compatibility.
+  const REFERENCE_TIME lowLatencyHns =
+      std::max(minimumExclusivePeriod, framesToHns(128));
+  const REFERENCE_TIME preferredHns =
+      std::max(minimumExclusivePeriod, framesToHns(requestedFrames));
   const REFERENCE_TIME fullBurstHns = std::max(minimumExclusivePeriod, burstHns);
-  const REFERENCE_TIME candidates[2] = { preferredHns, fullBurstHns };
+  const REFERENCE_TIME candidates[3] = {
+      lowLatencyHns, preferredHns, fullBurstHns
+  };
 
   std::printf("[WasapiPassthrough] exclusive periods: shared-default=%.2f ms, minimum=%.2f ms, "
-              "preferred=%.2f ms, full-burst=%.2f ms\n",
+              "low-latency=%.2f ms, preferred=%.2f ms, full-burst=%.2f ms\n",
               defaultPeriod / 10000.0, minimumExclusivePeriod / 10000.0,
-              preferredHns / 10000.0, fullBurstHns / 10000.0);
+              lowLatencyHns / 10000.0, preferredHns / 10000.0, fullBurstHns / 10000.0);
 
   bool initialized = false;
   bool fullBurstFallback = false;
-  REFERENCE_TIME acceptedHns = preferredHns;
-  for (int candidate = 0; candidate < 2 && !initialized; ++candidate)
+  REFERENCE_TIME acceptedHns = lowLatencyHns;
+  for (int candidate = 0; candidate < 3 && !initialized; ++candidate)
   {
-    if (candidate == 1 && candidates[1] == candidates[0]) break;
+    bool duplicate = false;
+    for (int earlier = 0; earlier < candidate; ++earlier)
+      duplicate = duplicate || (candidates[earlier] == candidates[candidate]);
+    if (duplicate) continue;
     REFERENCE_TIME bufferHns = candidates[candidate];
     for (unsigned attempt = 0; attempt < 4; ++attempt)
     {
@@ -262,7 +273,7 @@ bool WasapiPassthrough::InitExclusive(int rate)
       {
         initialized = true;
         acceptedHns = bufferHns;
-        fullBurstFallback = candidate == 1;
+        fullBurstFallback = candidate == 2;
         break;
       }
       if (hr != AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED) break;

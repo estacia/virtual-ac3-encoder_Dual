@@ -34,7 +34,7 @@ public:
     SpdifEncoder::Codec codec = SpdifEncoder::Codec::AC3;
     int64_t  bitRate = 640000;
     int64_t  dtsBitRate = 1536000;
-    uint32_t safeFrames = 1536;    // PCM ring cushion held beyond each 256-sample DSP block
+    uint32_t safeFrames = 1536;    // PCM ring cushion held beyond each 128-sample DSP block
     uint32_t renderPeriodFrames = 256; // ~5.33 ms at 48 kHz; endpoint may force fallback
     SpdifEncoder::Upmix upmix = SpdifEncoder::Upmix::Off;
     int      surroundWindowSize = 4096; // 1024 (512-sample hop) for low-latency Extreme mode
@@ -95,10 +95,10 @@ private:
   std::atomic_bool running_{false};
   std::atomic_bool failed_{false};
 
-  // Keep the existing 12-burst safety reserve. The render-side queue operations are
-  // now bounded SPSC copies with acquire/release publication; the render thread never
-  // waits for a mutex owned by the encoder worker.
-  static constexpr size_t kEncodedQueueCapacity = 12;
+  // Bound encoded look-ahead to three codec bursts; the render thread never waits
+  // for a mutex owned by the encoder worker. At AC-3/48 kHz this caps queued look-ahead
+  // at 96 ms (excluding the burst already being rendered and the encoder's in-flight work).
+  static constexpr size_t kEncodedQueueCapacity = 3;
   using EncodedBurst = std::array<uint8_t, kMaxBurstBytes>;
   SpscQueue<EncodedBurst, kEncodedQueueCapacity> queuedBursts_;
   std::mutex queueWaitMutex_; // used only by the encoder/startup waiters

@@ -79,12 +79,15 @@ TEST_CASE("encode: 5.1 float -> 6144-byte IEC 61937 burst")
   CHECK(HasIec61937Sync(out.data()));
 }
 
-TEST_CASE("incremental DSP: six 256-sample blocks form one AC-3 frame")
+TEST_CASE("incremental DSP: twelve 128-sample blocks form consecutive AC-3 frames")
 {
   SpdifEncoder enc;
   REQUIRE(InitFor(enc, 6, AV_SAMPLE_FMT_FLT));
   REQUIRE(enc.FramesPerPacket() == 1536);
-  std::vector<float> input(static_cast<size_t>(SpdifEncoder::kPcmChunkFrames) * 6 * 6, 0.0f);
+  const int blocksPerFrame = enc.FramesPerPacket() / SpdifEncoder::kPcmChunkFrames;
+  const int totalBlocks = blocksPerFrame * 2;
+  std::vector<float> input(static_cast<size_t>(SpdifEncoder::kPcmChunkFrames) *
+                           totalBlocks * 6, 0.0f);
   for (size_t i = 0; i < input.size(); i += 6)
   {
     input[i + 0] = 0.25f;
@@ -92,19 +95,19 @@ TEST_CASE("incremental DSP: six 256-sample blocks form one AC-3 frame")
   }
 
   std::vector<uint8_t> out(SpdifEncoder::kMaxBytesPerPacket);
-  for (int block = 0; block < 6; ++block)
+  for (int block = 0; block < totalBlocks; ++block)
   {
     const uint8_t* blockData = reinterpret_cast<const uint8_t*>(
         input.data() + static_cast<size_t>(block) * SpdifEncoder::kPcmChunkFrames * 6);
     const int n = enc.EncodeChunk(blockData, SpdifEncoder::kPcmChunkFrames,
                                   out.data(), static_cast<int>(out.size()));
-    if (block < 5)
-      CHECK(n == 0);
-    else
+    if ((block + 1) % blocksPerFrame == 0)
     {
       CHECK(n == 6144);
       CHECK(HasIec61937Sync(out.data()));
     }
+    else
+      CHECK(n == 0);
   }
 
   float peaks[6] = {};
@@ -114,12 +117,14 @@ TEST_CASE("incremental DSP: six 256-sample blocks form one AC-3 frame")
   CHECK(peaks[1] == doctest::Approx(0.25f).epsilon(0.01f));
 }
 
-TEST_CASE("incremental DSP: two 256-sample blocks form one DTS frame")
+TEST_CASE("incremental DSP: four 128-sample blocks form one DTS frame")
 {
   SpdifEncoder enc;
   REQUIRE(InitFor(enc, 6, AV_SAMPLE_FMT_FLT, 48000, SpdifEncoder::Codec::DTS));
   REQUIRE(enc.FramesPerPacket() == 512);
-  std::vector<float> input(static_cast<size_t>(SpdifEncoder::kPcmChunkFrames) * 2 * 6, 0.0f);
+  const int blocksPerFrame = enc.FramesPerPacket() / SpdifEncoder::kPcmChunkFrames;
+  std::vector<float> input(static_cast<size_t>(SpdifEncoder::kPcmChunkFrames) *
+                           blocksPerFrame * 6, 0.0f);
   for (size_t i = 0; i < input.size(); i += 6)
   {
     input[i + 0] = 0.20f;
@@ -127,16 +132,20 @@ TEST_CASE("incremental DSP: two 256-sample blocks form one DTS frame")
   }
 
   std::vector<uint8_t> out(SpdifEncoder::kMaxBytesPerPacket);
-  const uint8_t* first = reinterpret_cast<const uint8_t*>(input.data());
-  CHECK(enc.EncodeChunk(first, SpdifEncoder::kPcmChunkFrames,
-                        out.data(), static_cast<int>(out.size())) == 0);
-
-  const uint8_t* second = reinterpret_cast<const uint8_t*>(
-      input.data() + static_cast<size_t>(SpdifEncoder::kPcmChunkFrames) * 6);
-  const int n = enc.EncodeChunk(second, SpdifEncoder::kPcmChunkFrames,
-                                out.data(), static_cast<int>(out.size()));
-  CHECK(n == 2048);
-  CHECK((HasIec61937Sync(out.data()) || HasDtsSync(out.data())));
+  for (int block = 0; block < blocksPerFrame; ++block)
+  {
+    const uint8_t* blockData = reinterpret_cast<const uint8_t*>(
+        input.data() + static_cast<size_t>(block) * SpdifEncoder::kPcmChunkFrames * 6);
+    const int n = enc.EncodeChunk(blockData, SpdifEncoder::kPcmChunkFrames,
+                                  out.data(), static_cast<int>(out.size()));
+    if (block + 1 < blocksPerFrame)
+      CHECK(n == 0);
+    else
+    {
+      CHECK(n == 2048);
+      CHECK((HasIec61937Sync(out.data()) || HasDtsSync(out.data())));
+    }
+  }
 }
 
 TEST_CASE("encode: 7.1 input is downmixed to 5.1")
