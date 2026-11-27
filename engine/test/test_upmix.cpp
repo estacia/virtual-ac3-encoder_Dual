@@ -1117,3 +1117,60 @@ TEST_CASE("4.0 speaker layout: Dual Stereo Copy keeps stereo copy behavior uncha
   CHECK(rms[4] > 0.03);
   CHECK(rms[5] > 0.03);
 }
+
+TEST_CASE("4.0 layout: Dynamic and Always Surround stereo upmix keep four speakers and omit synthetic C/LFE")
+{
+  for (const auto mode : {SpdifEncoder::Upmix::Surround, SpdifEncoder::Upmix::Always})
+  {
+    SpdifEncoder::FilterStatus status = SpdifEncoder::FilterStatus::Disabled;
+    const std::vector<double> rms =
+        EncodeTimeDomainNative51Rms(false, false, mode, 1.0f, &status, true);
+    REQUIRE(rms.size() >= 6);
+    CHECK(rms[0] > 0.03);
+    CHECK(rms[1] > 0.03);
+    CHECK(rms[2] < 0.005);
+    CHECK(rms[3] < 0.005);
+    CHECK(rms[4] > 0.01);
+    CHECK(rms[5] > 0.01);
+    CHECK(status == SpdifEncoder::FilterStatus::SpeakerLayout4_0Upmix);
+  }
+}
+
+TEST_CASE("4.0 layout: Dynamic and Always Surround upmix stereo carried by a 5.1 endpoint")
+{
+  for (const auto mode : {SpdifEncoder::Upmix::Surround, SpdifEncoder::Upmix::Always})
+  {
+    SpdifEncoder::FilterStatus status = SpdifEncoder::FilterStatus::Disabled;
+    const std::vector<double> rms =
+        EncodeTimeDomainNative51Rms(true, false, mode, 1.0f, &status, true);
+    REQUIRE(rms.size() >= 6);
+    CHECK(rms[0] > 0.03);
+    CHECK(rms[1] > 0.03);
+    CHECK(rms[2] < 0.005);
+    CHECK(rms[3] < 0.005);
+    CHECK(rms[4] > 0.01);
+    CHECK(rms[5] > 0.01);
+    CHECK(status == SpdifEncoder::FilterStatus::SpeakerLayout4_0Upmix);
+  }
+}
+
+TEST_CASE("4.0 layout: Dynamic and Always Surround redirect native Center/LFE and preserve native Surrounds")
+{
+  const std::vector<double> baseline =
+      EncodeTimeDomainNative51Rms(true, true, SpdifEncoder::Upmix::Off);
+  for (const auto mode : {SpdifEncoder::Upmix::Surround, SpdifEncoder::Upmix::Always})
+  {
+    SpdifEncoder::FilterStatus status = SpdifEncoder::FilterStatus::Disabled;
+    const std::vector<double> folded =
+        EncodeTimeDomainNative51Rms(true, true, mode, 1.0f, &status, true);
+    REQUIRE(baseline.size() >= 6);
+    REQUIRE(folded.size() >= 6);
+    CHECK(folded[0] > baseline[0]);
+    CHECK(folded[1] > baseline[1]);
+    CHECK(folded[2] < 0.005);
+    CHECK(folded[3] < 0.005);
+    CHECK(std::fabs(folded[4] - baseline[4]) < 0.02);
+    CHECK(std::fabs(folded[5] - baseline[5]) < 0.02);
+    CHECK(status == SpdifEncoder::FilterStatus::SpeakerLayout4_0FoldDown);
+  }
+}
