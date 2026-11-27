@@ -62,8 +62,9 @@ struct Config
     return 1024;
   }
 
-  // Stereo->5.1 handling: "off", "surround" (FFmpeg FFT upmix), or "dual_stereo"
-  // (direct FL->SL / FR->SR copy for stereo sources; native multichannel passes through).
+  // Stereo->5.1 handling includes "time_domain" (low-latency matrix with stereo detection)
+  // and "time_domain_51" (same matrix for 2-channel input; every multichannel input bypasses it).
+  // The strict mode preserves 5.1 channel content even when only FL/FR are active.
   // Default "surround": this tool targets a 5.1 optical path, so stereo sources use all speakers.
   // Physical output format: "ac3" (Dolby Digital), "dts" (DTS Core), or "pcm" (stereo PCM).
   std::string outputMode = "ac3";
