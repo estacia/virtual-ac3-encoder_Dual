@@ -825,7 +825,7 @@ TEST_CASE("time-domain matrix: anti-phase stereo steers to rear channels without
   const bool ok = enc.Init(p);
   av_channel_layout_uninit(&p.inLayout);
   REQUIRE(ok);
-  CHECK(enc.GetFilterStatus() == SpdifEncoder::FilterStatus::Disabled);
+  CHECK(enc.GetFilterStatus() == SpdifEncoder::FilterStatus::TimeDomainWaiting);
   CHECK(enc.FilterHopFrames() == 0);
   CHECK(enc.FilterFifoFrames() == 0);
   CHECK(enc.FilterProcessedFrames() == 0);
