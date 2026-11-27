@@ -91,7 +91,7 @@ int g_latencyPreset = 2; // 0=Extreme, 1=Fast, 2=Balanced, 3=Safe, 4=Relaxed
 int g_safeFrames = 128;
 bool g_useCustomSafeFrames = false;
 int g_upmixMode = 0; // 0=Dynamic, 6=Dual Stereo, 7=Off, 8=Time-domain Matrix, 9=Matrix + Native 5.1 Untouched
-bool g_speakerLayout4_0 = true; // no Center/Sub; fold native C/LFE into FL/FR for modes 6 and 9
+bool g_speakerLayout4_0 = true; // no Center/Sub; apply 4.0 routing to Dynamic, Always, Dual Stereo and Time-domain Native modes
 bool g_loopback = true;
 bool g_outAutoSpdif = true;
 int  g_reloadId = 1;
@@ -1129,6 +1129,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int) {
                     case 7: filterLabel = "Time-domain Matrix active (stereo detected)"; break;
                     case 8: filterLabel = "Native 5.1/7.1 preserved (matrix bypassed)"; break;
                     case 9: filterLabel = "4.0 fold-down active (Center/LFE redirected to FL/FR)"; break;
+                    case 10: filterLabel = "4.0 surround upmix active (Center/LFE omitted)"; break;
                     default: break;
                 }
                 ImGui::Text("Upmix processing: %s", filterLabel);
@@ -1309,12 +1310,12 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int) {
             else if (g_upmixMode == 9)
                 ImGui::TextDisabled("No FFT/FIFO. Also upmixes front-only stereo on a 5.1/7.1 endpoint; discrete C/LFE/Surround activity preserves native audio (-80 dB threshold, 3 s hold).");
 
-            if (g_upmixMode == 6 || g_upmixMode == 9) {
+            if (g_upmixMode == 0 || g_upmixMode == 4 || g_upmixMode == 6 || g_upmixMode == 9) {
                 if (ImGui::Checkbox("4.0 Speaker Layout (No Center / No Subwoofer)", &g_speakerLayout4_0)) {
                     TriggerApplySettings();
                 }
                 if (g_speakerLayout4_0) {
-                    ImGui::TextDisabled("Native 5.1: Center -> FL/FR (-3 dB each); LFE -> FL/FR (ITU +10 dB, then -6 dB per side). SL/SR stay discrete. Stereo inputs do not double-add generated Center/LFE.");
+                    ImGui::TextDisabled("Native 5.1: Center -> FL/FR (-3 dB each); LFE -> FL/FR (ITU +10 dB, then -6 dB per side). SL/SR stay discrete. Stereo upmix keeps FL/FR + generated SL/SR and omits synthetic Center/LFE.");
                 } else {
                     ImGui::TextDisabled("5.1 Preserve: Center and LFE stay in their original channels for a system with Center/Sub speakers.");
                 }

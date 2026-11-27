@@ -63,7 +63,7 @@ struct Config
   }
 
   // Stereo->5.1 handling includes "time_domain" and "time_domain_51" (content-aware stereo/native detection).
-  // speakerLayout4_0 enables Center/LFE redirection for DualStereo and TimeDomainNative51 only.
+  // speakerLayout4_0 enables 4.0 routing for Surround, Always, DualStereo and TimeDomainNative51.
   // Default "surround": this tool targets a 5.1 optical path, so stereo sources use all speakers.
   // Physical output format: "ac3" (Dolby Digital), "dts" (DTS Core), or "pcm" (stereo PCM).
   std::string outputMode = "ac3";

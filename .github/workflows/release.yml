@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Explicit version e.g. 1.0.7 (else commit marker, then auto patch-bump)'
+        description: 'Explicit version e.g. 1.0.8 (else commit marker, then auto patch-bump)'
         required: false
 
 permissions:
@@ -130,7 +130,7 @@ jobs:
           $exe = "installer/Output/virtual-ac3-encoder-setup-$ver.exe"
           $notes = @"
           **Dolby Control Center** — Real-time multichannel & stereo PCM -> **DTS 5.1** / **Dolby Digital (AC-3) 5.1** / **PCM 2.0** -> IEC 61937 / S-PDIF (Toslink) processor for Windows.
-          A software ``Dolby Digital Live`` & ``DTS Connect`` replacement with a DirectX 11 Control Center, 6-channel VU meters, Dynamic Surround 5.1, Time-domain Matrix 5.1, content-aware Time-domain Matrix + Native 5.1 Untouched, and Dual Stereo Copy. Optional 4.0 speaker layout folds native Center to FL/FR at -3 dB each and redirects LFE to FL/FR using ITU-R BS.775-4 level compensation; SL/SR remain discrete. Live diagnostics report capture drops, output underruns, WASAPI errors, queue depth, processing time, FFT state, Time-domain Matrix activity, and 4.0 fold-down.
+          A software ``Dolby Digital Live`` & ``DTS Connect`` replacement with a DirectX 11 Control Center, 6-channel VU meters, Dynamic Surround 5.1, Always Surround 5.1, Time-domain Matrix, and Dual Stereo Copy. Optional 4.0 speaker layout is available in Dynamic Surround, Always Surround, Dual Stereo Copy, and Time-domain Matrix + Native 5.1 Untouched: native Center/LFE are folded into Front L/R, while stereo upmix omits synthetic Center/LFE and keeps the four real speaker channels. SL/SR remain discrete. Live diagnostics report capture drops, output underruns, WASAPI errors, queue depth, processing time, FFT state, Time-domain Matrix activity, and 4.0 routing.
 
           ## Downloads
           - **virtual-ac3-encoder-setup-$ver.exe** - **Dolby Control Center** installer (per-user, no admin); auto-starts minimized to tray at logon.
