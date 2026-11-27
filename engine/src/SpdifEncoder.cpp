@@ -891,7 +891,8 @@ bool SpdifEncoder::IsEffectivelyStereo(const uint8_t* in, int inputFrames,
   // only populate Front Left (ch 0) and Front Right (ch 1); Windows leaves all discrete
   // non-stereo channels (Center = ch 2, LFE = ch 3, Surrounds = ch 4..ch-1) at digital zero.
   // If ANY discrete multichannel channel (Center, LFE, or Rear/Side Surrounds, c >= 2) carries
-  // signal (>= -66 dB), the source is native 5.1/7.1 and MUST pass through untouched.
+  // signal above the selected RMS threshold, the source is treated as native 5.1/7.1 and
+  // passed through untouched. The strict Time-domain mode supplies a lower -80 dBFS threshold.
   double discreteSumSq = 0.0;
   double frontSumSq = 0.0;
   const int discreteChannels = ch - 2;
