@@ -48,6 +48,8 @@ SpdifEncoder::FilterStatus SpdifEncoder::GetFilterStatus() const
 {
   if (speakerFoldDownActive_)
     return FilterStatus::SpeakerLayout4_0FoldDown;
+  if (speakerLayout4_0UpmixActive_)
+    return FilterStatus::SpeakerLayout4_0Upmix;
   if (timeDomain_)
   {
     if (!timeDomainMatrixDetected_)
@@ -338,8 +340,10 @@ bool SpdifEncoder::Init(const Params& p)
   timeDomainMatrixDetected_ = false;
   timeDomainMatrixApplied_ = false;
   foldDownCenterLfeToFront_ = p.foldDownCenterLfeToFront &&
-      (p.upmix == Upmix::TimeDomainNative51 || p.upmix == Upmix::DualStereo);
+      (p.upmix == Upmix::Surround || p.upmix == Upmix::Always ||
+       p.upmix == Upmix::TimeDomainNative51 || p.upmix == Upmix::DualStereo);
   speakerFoldDownActive_ = false;
+  speakerLayout4_0UpmixActive_ = false;
   foldDownLimiterGain_ = 1.0f;
   lfeFilterState_ = 0.0f;
   useFilter_ = (wantUpmix && inLayout_.nb_channels <= 2);
@@ -463,6 +467,7 @@ void SpdifEncoder::Close()
   timeDomainMatrixApplied_ = false;
   foldDownCenterLfeToFront_ = false;
   speakerFoldDownActive_ = false;
+  speakerLayout4_0UpmixActive_ = false;
   foldDownLimiterGain_ = 1.0f;
   lfeFilterState_ = 0.0f;
   dynamicUpmix_ = false;
@@ -669,6 +674,7 @@ int SpdifEncoder::EncodeChunk(const uint8_t* in, int inputFrames,
   bool haveProcessedChunk = false;
   bool foldDownNativeChannels = false;
   speakerFoldDownActive_ = false;
+  speakerLayout4_0UpmixActive_ = false;
 
   auto convertDirect = [&](SwrContext* converter) -> bool {
     if (!converter || av_frame_make_writable(chunkFrame_) < 0) return false;
@@ -707,7 +713,12 @@ int SpdifEncoder::EncodeChunk(const uint8_t* in, int inputFrames,
     const bool stereoSource = alwaysUpmix_ ||
         IsEffectivelyStereo(in, inputFrames, &hasDiscreteActivity);
 
-    if (!alwaysUpmix_ && hasDiscreteActivity)
+    // In 4.0 mode, even Always Surround preserves a genuine multichannel source
+    // instead of discarding its native Center/LFE and rear channels to rebuild from FL/FR.
+    // It still forces the surround filter for stereo/front-only content.
+    const bool preserveNativeFor4_0 = foldDownCenterLfeToFront_ &&
+        alwaysUpmix_ && hasDiscreteActivity;
+    if ((!alwaysUpmix_ && hasDiscreteActivity) || preserveNativeFor4_0)
     {
       if (!dynamicFilterBypassed_)
       {
@@ -718,6 +729,8 @@ int SpdifEncoder::EncodeChunk(const uint8_t* in, int inputFrames,
       }
       dynamicFilterBypassed_ = true;
       dynamicFilterActive_ = false;
+      if (foldDownCenterLfeToFront_)
+        foldDownNativeChannels = true;
     }
     else
     {
@@ -779,6 +792,7 @@ int SpdifEncoder::EncodeChunk(const uint8_t* in, int inputFrames,
       {
         std::fill_n(reinterpret_cast<float*>(chunkFrame_->extended_data[2]), inputFrames, 0.0f);
         std::fill_n(reinterpret_cast<float*>(chunkFrame_->extended_data[3]), inputFrames, 0.0f);
+        speakerLayout4_0UpmixActive_ = true;
       }
     }
     else if (foldDownCenterLfeToFront_)
@@ -840,6 +854,8 @@ int SpdifEncoder::EncodeChunk(const uint8_t* in, int inputFrames,
       std::memcpy(sr, fr, bytes);
       std::memset(fc, 0, bytes);
       std::memset(lfe, 0, bytes);
+      if (foldDownCenterLfeToFront_)
+        speakerLayout4_0UpmixActive_ = true;
     }
     else if (foldDownCenterLfeToFront_)
     {
@@ -888,6 +904,17 @@ int SpdifEncoder::EncodeChunk(const uint8_t* in, int inputFrames,
         if (s) std::fill_n(s, inputFrames, 0.0f);
       }
     }
+  }
+
+  // FFT-based Dynamic/Always Surround creates Center and LFE while constructing 5.1.
+  // A 4.0 speaker layout keeps the four real speakers but omits those synthetic channels
+  // (the original stereo remains intact in FL/FR; no duplicate center/bass is added).
+  if (usedUpmixFilter && foldDownCenterLfeToFront_ &&
+      codecCtx_->ch_layout.nb_channels >= 6)
+  {
+    std::fill_n(reinterpret_cast<float*>(chunkFrame_->extended_data[2]), inputFrames, 0.0f);
+    std::fill_n(reinterpret_cast<float*>(chunkFrame_->extended_data[3]), inputFrames, 0.0f);
+    speakerLayout4_0UpmixActive_ = true;
   }
 
   ApplyChannelGainsAndComputeLevels(chunkFrame_);
