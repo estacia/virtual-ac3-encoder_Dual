@@ -48,6 +48,22 @@ struct MeterSharedState
 };
 #pragma pack(pop)
 
+// The consumer maps this structure with FILE_MAP_READ. These helpers deliberately
+// use ordinary aligned volatile loads: InterlockedCompareExchange* performs a
+// read-modify-write and faults on the read-only consumer view.
+inline unsigned long long ReadMeterCounter(const volatile LONG64* value) noexcept
+{
+  return static_cast<unsigned long long>(*value);
+}
+
+inline LONG ReadMeterLong(const volatile LONG* value) noexcept
+{
+  return *value;
+}
+
+static_assert((offsetof(MeterSharedState, captureDroppedFrames) % 8) == 0,
+              "64-bit telemetry counters must be 8-byte aligned for x64 reads");
+
 class MeterSharedMemory
 {
 public:
