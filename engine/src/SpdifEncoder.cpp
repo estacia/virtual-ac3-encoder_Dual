@@ -682,11 +682,15 @@ int SpdifEncoder::EncodeChunk(const uint8_t* in, int inputFrames,
   else if (timeDomain_)
   {
     if (!convertDirect(swr_)) return -1;
-    // The strict variant trusts the configured input layout. Only a true 2-channel
-    // endpoint is matrix-upmixed; 5.1/7.1 endpoints bypass the matrix even when
-    // the current content carries audio only in FL/FR.
+    // Both Time-domain modes inspect actual channel activity, not just endpoint layout.
+    // This allows stereo carried by a 5.1/7.1 virtual endpoint to be matrix-upmixed,
+    // while native multichannel content remains untouched whenever discrete channels
+    // (Center/LFE/Surrounds) are active.
+    // The Native 5.1 Untouched variant uses a lower -80 dBFS RMS threshold (vs -66 dB)
+    // so quiet discrete channels still protect genuine 5.1/7.1 material.
+    const double nativeProtectionThreshold = timeDomainNative51_ ? 0.0001 : 0.0005;
     const bool stereoSource = (inLayout_.nb_channels <= 2) ||
-        (!timeDomainNative51_ && IsEffectivelyStereo(in, inputFrames));
+        IsEffectivelyStereo(in, inputFrames, nullptr, nativeProtectionThreshold);
     if (stereoSource) ApplyTimeDomainUpmix(chunkFrame_);
     haveProcessedChunk = true;
   }
@@ -872,7 +876,8 @@ int SpdifEncoder::WritePacketThunk(void* opaque, const uint8_t* buf, int buf_siz
 }
 
 bool SpdifEncoder::IsEffectivelyStereo(const uint8_t* in, int inputFrames,
-                                       bool* hasDiscreteActivity) const
+                                       bool* hasDiscreteActivity,
+                                       double discreteRmsThreshold) const
 {
   if (hasDiscreteActivity)
     *hasDiscreteActivity = false;
@@ -939,8 +944,7 @@ bool SpdifEncoder::IsEffectivelyStereo(const uint8_t* in, int inputFrames,
 
   const double discreteRms = std::sqrt(discreteSumSq / (inputFrames * discreteChannels));
   const double frontRms = std::sqrt(frontSumSq / (inputFrames * 2));
-  constexpr double kThreshold = 0.0005; // ~ -66 dB
-  const bool discreteActive = discreteRms >= kThreshold;
+  const bool discreteActive = discreteRms >= std::max(0.0, discreteRmsThreshold);
   if (hasDiscreteActivity)
     *hasDiscreteActivity = discreteActive;
 
