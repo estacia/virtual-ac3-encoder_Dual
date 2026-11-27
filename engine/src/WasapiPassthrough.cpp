@@ -405,9 +405,9 @@ void WasapiPassthrough::EncoderThreadProc()
         pendingTrimFrames_.fetch_add(trimRequested - discardedFrames, std::memory_order_release);
     }
 
-    // Keep SafeFrames in the input ring while consuming one DSP quantum at a time.
-    // Unlike the previous frame-wide gate, this does not wait for all 1536 AC-3
-    // samples before starting DSP; the codec still receives only complete frames.
+    // Keep the configured safety cushion in the raw input ring, but do not wait
+    // for an entire AC-3 frame. Each 256-sample quantum is conditioned while later
+    // PCM samples are still arriving; only the completed codec frame is encoded.
     const size_t available = ring_->BytesAvailable();
     if (available < readyBytes)
     {
@@ -416,6 +416,11 @@ void WasapiPassthrough::EncoderThreadProc()
     }
     if (ring_->Read(staging_.data(), chunkBytes) != chunkBytes)
       continue;
+
+    // Count every consumed input sample until its corresponding IEC burst has
+    // actually been submitted to WASAPI, including samples in the partial-frame FIFO.
+    encoderPendingFrames_.fetch_add(
+        static_cast<uint32_t>(SpdifEncoder::kPcmChunkFrames), std::memory_order_acq_rel);
 
     const auto encodeStart = std::chrono::steady_clock::now();
     const int encodedBytes = enc_.EncodeChunk(
@@ -466,11 +471,9 @@ void WasapiPassthrough::EncoderThreadProc()
       break;
     }
 
-    encoderPendingFrames_.fetch_add(static_cast<uint32_t>(framesPerPacket_), std::memory_order_acq_rel);
     if (!queuedBursts_.TryPush(encoderBurst_))
     {
       ReleaseSemaphore(queueSpaceSemaphore_, 1, nullptr);
-      encoderPendingFrames_.fetch_sub(static_cast<uint32_t>(framesPerPacket_), std::memory_order_acq_rel);
       failed_.store(true, std::memory_order_release);
       running_.store(false, std::memory_order_release);
       if (diagnostics_) diagnostics_->outputWasapiErrors.fetch_add(1, std::memory_order_relaxed);
@@ -694,8 +697,7 @@ void WasapiPassthrough::ThreadProc()
     std::fprintf(stderr, "[WasapiPassthrough] AvSetMmThreadPriority(HIGH) failed: %lu\n",
                  GetLastError());
 
-  const uint32_t desired =
-      static_cast<uint32_t>(SpdifEncoder::kPcmChunkFrames) + params_.safeFrames;
+  const uint32_t desired = static_cast<uint32_t>(framesPerPacket_) + params_.safeFrames;
   HANDLE waits[2] = { dataEvent_, stopEvent_ };
   unsigned consecutiveTimeouts = 0;
 
