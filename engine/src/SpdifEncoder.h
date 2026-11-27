@@ -66,6 +66,8 @@ public:
   // - Always: forces 5.1 surround upmixing unconditionally on all inputs
   // - AlwaysFront: forces 3.1 upmixing (Center + Sub/LFE) unconditionally on all inputs
   // - DualStereo: copies FL->SL and FR->SR for stereo content; native multichannel passes through.
+  // - In 4.0 speaker layout for DualStereo / TimeDomainNative51, native Center/LFE are folded
+  //   into FL/FR and cleared; stereo-derived Center/LFE are omitted to avoid double counting.
   enum class Upmix
   {
     Off,
@@ -77,7 +79,7 @@ public:
     AlwaysFront,  // Forced 3.1 on all audio
     DualStereo,   // Direct stereo copy: FL->SL, FR->SR; Center/LFE silent; native 5.1 untouched
     TimeDomain,   // Center/difference-rear + one-pole LFE; auto-detects stereo in multichannel input
-    TimeDomainNative51, // Same matrix for 2ch input; any multichannel input bypasses the matrix
+    TimeDomainNative51, // Content-aware matrix for stereo-in-5.1; native discrete channels are preserved
   };
 
   struct Params
