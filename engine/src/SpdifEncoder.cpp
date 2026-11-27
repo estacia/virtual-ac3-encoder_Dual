@@ -266,10 +266,12 @@ bool SpdifEncoder::Init(const Params& p)
   dualStereo_ = (p.upmix == Upmix::DualStereo);
   // Dual Stereo intentionally bypasses the FFT-based surround filter and uses only
   // direct planar channel copies after the normal PCM -> 5.1 sample-format conversion.
-  const bool wantUpmix = (p.upmix != Upmix::Off && !dualStereo_ &&
-                          p.upmix != Upmix::TimeDomain);
+  const bool isTimeDomain = (p.upmix == Upmix::TimeDomain ||
+                             p.upmix == Upmix::TimeDomainNative51);
+  const bool wantUpmix = (p.upmix != Upmix::Off && !dualStereo_ && !isTimeDomain);
   alwaysUpmix_ = (p.upmix == Upmix::Always || p.upmix == Upmix::AlwaysFront);
-  timeDomain_ = (p.upmix == Upmix::TimeDomain);
+  timeDomain_ = isTimeDomain;
+  timeDomainNative51_ = (p.upmix == Upmix::TimeDomainNative51);
   lfeFilterState_ = 0.0f;
   useFilter_ = (wantUpmix && inLayout_.nb_channels <= 2);
   dynamicUpmix_ = (wantUpmix && inLayout_.nb_channels > 2);
@@ -387,6 +389,7 @@ void SpdifEncoder::Close()
   useFilter_ = false;
   useDts_ = false;
   timeDomain_ = false;
+  timeDomainNative51_ = false;
   lfeFilterState_ = 0.0f;
   dynamicUpmix_ = false;
   alwaysUpmix_ = false;
@@ -679,8 +682,11 @@ int SpdifEncoder::EncodeChunk(const uint8_t* in, int inputFrames,
   else if (timeDomain_)
   {
     if (!convertDirect(swr_)) return -1;
+    // The strict variant trusts the configured input layout. Only a true 2-channel
+    // endpoint is matrix-upmixed; 5.1/7.1 endpoints bypass the matrix even when
+    // the current content carries audio only in FL/FR.
     const bool stereoSource = (inLayout_.nb_channels <= 2) ||
-                              IsEffectivelyStereo(in, inputFrames);
+        (!timeDomainNative51_ && IsEffectivelyStereo(in, inputFrames));
     if (stereoSource) ApplyTimeDomainUpmix(chunkFrame_);
     haveProcessedChunk = true;
   }
