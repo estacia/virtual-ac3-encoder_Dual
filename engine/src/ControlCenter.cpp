@@ -1128,6 +1128,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int) {
                     case 6: filterLabel = "Time-domain Matrix - waiting for input"; break;
                     case 7: filterLabel = "Time-domain Matrix active (stereo detected)"; break;
                     case 8: filterLabel = "Native 5.1/7.1 preserved (matrix bypassed)"; break;
+                    case 9: filterLabel = "4.0 fold-down active (Center/LFE redirected to FL/FR)"; break;
                     default: break;
                 }
                 ImGui::Text("Upmix processing: %s", filterLabel);
