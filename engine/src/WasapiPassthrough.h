@@ -34,7 +34,7 @@ public:
     SpdifEncoder::Codec codec = SpdifEncoder::Codec::AC3;
     int64_t  bitRate = 640000;
     int64_t  dtsBitRate = 1536000;
-    uint32_t safeFrames = 1536;    // target PCM cushion after the initial AC-3 frame
+    uint32_t safeFrames = 1536;    // PCM ring cushion held beyond each 256-sample DSP block
     uint32_t renderPeriodFrames = 256; // ~5.33 ms at 48 kHz; endpoint may force fallback
     SpdifEncoder::Upmix upmix = SpdifEncoder::Upmix::Off;
     int      surroundWindowSize = 4096; // 1024 (512-sample hop) for low-latency Extreme mode

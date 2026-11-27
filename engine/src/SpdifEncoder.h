@@ -46,6 +46,7 @@ public:
   };
 
   static constexpr int kSurroundFilterHopFrames = 2048;
+  // Input-side DSP quantum. AC-3/DTS codec frame sizes remain unchanged.
 
   SpdifEncoder();
   ~SpdifEncoder();
@@ -111,12 +112,16 @@ public:
   // An IEC 61937 AC3 burst is 6144 bytes; DTS burst is 2048 bytes.
   static constexpr int kMaxBytesPerPacket = 6144;
 
+  static constexpr int kPcmChunkFrames = 256;
+
   // Encode exactly FramesPerPacket() interleaved input frames into one IEC 61937 burst.
   //   in      : FramesPerPacket() * InChannels() samples in Params::inSampleFmt
   //   outBuf  : destination for the S/PDIF burst
   //   outSize : capacity of outBuf (must be >= kMaxBytesPerPacket)
   // Returns bytes written, 0 if the encoder produced no packet, <0 on error.
   int EncodePacket(const uint8_t* in, uint8_t* outBuf, int outSize);
+  // Process one 256-sample PCM block. Returns 0 until a full codec frame is ready.
+  int EncodeChunk(const uint8_t* in, int inputFrames, uint8_t* outBuf, int outSize);
 
 private:
   // FFmpeg >= 6.1 AVIO write callback signature uses const uint8_t*.
@@ -124,15 +129,17 @@ private:
   int OnWritePacket(const uint8_t* buf, int buf_size);
 
   bool BuildFilterGraph();              // surround-upmix path
-  bool FeedFilter(const uint8_t* in);  // push one input packet, drain output into fifo_
+  bool FeedFilter(const uint8_t* in);  // codec-sized compatibility wrapper
+  bool FeedFilterFrames(const uint8_t* in, int inputFrames);
   int  EncodeFrameToBurst(uint8_t* outBuf, int outSize);
-  void ApplyChannelGains();
-  void ApplyTimeDomainUpmix();
-  void ComputeLevels();
+  void ApplyChannelGains(AVFrame* target);
+  void ApplyTimeDomainUpmix(AVFrame* target);
+  void ComputeLevels(AVFrame* target);
 
   // Dynamic upmix helpers: detect stereo content in a multichannel stream and extract FL+FR.
-  bool IsEffectivelyStereo(const uint8_t* in, bool* hasDiscreteActivity = nullptr) const;
-  void ExtractStereo(const uint8_t* in, uint8_t* out) const;
+  bool IsEffectivelyStereo(const uint8_t* in, int inputFrames,
+                           bool* hasDiscreteActivity = nullptr) const;
+  void ExtractStereo(const uint8_t* in, uint8_t* out, int inputFrames) const;
 
   mutable std::array<std::atomic<float>, 6> peakLevels_{};
   mutable std::array<std::atomic<float>, 6> rmsLevels_{};
@@ -142,7 +149,9 @@ private:
   SwrContext*      swr_      = nullptr;
   SwrContext*      dualStereoSwr_ = nullptr; // two-channel conversion fast path for Dual Stereo Copy
   SwrContext*      dtsS32Swr_ = nullptr; // FLTP to packed S32 for DTS
-  AVFrame*         frame_    = nullptr;  // planar-float processing frame
+  AVFrame*         frame_    = nullptr;  // complete codec-sized planar-float frame
+  AVFrame*         chunkFrame_ = nullptr; // one 256-sample DSP work frame
+  AVAudioFifo*     processedFifo_ = nullptr; // accumulates processed blocks into codec frames
   AVFrame*         dtsFrame_  = nullptr;  // packed S32 frame for the DTS encoder
   AVPacket*        pkt_      = nullptr;
 
