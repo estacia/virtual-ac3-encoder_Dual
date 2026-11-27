@@ -945,6 +945,7 @@ bool SpdifEncoder::IsEffectivelyStereo(const uint8_t* in, int inputFrames,
 
   const double discreteRms = std::sqrt(discreteSumSq / (inputFrames * discreteChannels));
   const double frontRms = std::sqrt(frontSumSq / (inputFrames * 2));
+  constexpr double kFrontActivityThreshold = 0.0005; // ~ -66 dBFS
   const bool discreteActive = discreteRms >= std::max(0.0, discreteRmsThreshold);
   if (hasDiscreteActivity)
     *hasDiscreteActivity = discreteActive;
@@ -961,7 +962,7 @@ bool SpdifEncoder::IsEffectivelyStereo(const uint8_t* in, int inputFrames,
 
   if (multichannelHoldFrames_ > 0)
   {
-    if (frontRms >= kThreshold)
+    if (frontRms >= kFrontActivityThreshold)
       multichannelHoldFrames_ = std::max(0, multichannelHoldFrames_ - inputFrames);
     if (multichannelHoldFrames_ > 0)
     {
