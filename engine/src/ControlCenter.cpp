@@ -1288,16 +1288,16 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int) {
                 "Always Front Stage 3.1 (Forced 3.1 on All Audio - Rears Silent)",
                 "Dual Stereo Copy (FL->SL / FR->SR, No Upmix, Native 5.1 Untouched)",
                 "Off (Pure Stereo 2.0: Front L/R Only, Center & Sub Silent)",
-                "Time-domain Matrix 5.1 (No FFT/FIFO; Center + Difference Rears + LFE)",
-                "Time-domain Matrix + Native 5.1 Untouched (Matrix only for 2-channel input)"
+                "Time-domain Matrix 5.1 (Auto-detect stereo content; native 5.1 preserved)",
+                "Time-domain Matrix + Native 5.1 Untouched (Auto-detect stereo inside 5.1/7.1)"
             };
             if (ImGui::Combo("Stereo Upmix", &g_upmixMode, upmixes, IM_ARRAYSIZE(upmixes))) {
                 TriggerApplySettings();
             }
             if (g_upmixMode == 8)
-                ImGui::TextDisabled("No FFT/FIFO buffering; multichannel input is matrix-upmixed only when it is detected as effectively stereo.");
+                ImGui::TextDisabled("No FFT/FIFO. Stereo content on a 5.1/7.1 endpoint is matrix-upmixed when discrete channels are inactive; native multichannel is preserved (-66 dB threshold, 3 s hold).");
             else if (g_upmixMode == 9)
-                ImGui::TextDisabled("No FFT/FIFO buffering. Applies the matrix only to 2-channel input; any multichannel input bypasses the matrix, even when only FL/FR are active.");
+                ImGui::TextDisabled("No FFT/FIFO. Also upmixes front-only stereo on a 5.1/7.1 endpoint; discrete C/LFE/Surround activity preserves native audio (-80 dB threshold, 3 s hold).");
 
             ImGui::Spacing();
             const char* activeModeStr = (g_outputMode == 0) ? "DTS 5.1" : ((g_outputMode == 1) ? "Dolby Digital (AC3)" : "PCM Stereo");
