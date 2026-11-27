@@ -30,7 +30,8 @@ the real-time audio engine (engine.exe). Double-click the tray icon to open the 
 Center and adjust:
   - Encoder Mode: DTS 5.1, Dolby Digital 5.1 (AC3), or PCM Stereo 2.0
   - Bitrate & Latency Preset (Extreme ~3ms to Relaxed ~35ms)
-  - Stereo Upmix: Dynamic Surround 5.1, Time-domain Matrix 5.1, Time-domain Matrix + Native 5.1 Untouched (stereo is detected even on a 5.1/7.1 endpoint; discrete native channels are preserved), Dual Stereo Copy, or Off
+  - Stereo Upmix: Dynamic Surround 5.1, Time-domain Matrix 5.1, Time-domain Matrix + Native 5.1 Untouched, Dual Stereo Copy, or Off
+  - Speaker Layout: 4.0 (no Center/Sub) folds native Center to Front L/R at -3 dB each and redirects LFE to Front L/R with standard level compensation; SL/SR remain discrete. Set 5.1 to preserve Center/LFE for a full 5.1 speaker set.
   - Stream Diagnostics: shows whether Time-domain Matrix is actively upmixing stereo or preserving native 5.1/7.1
   - Individual 6-channel speaker trims (-60 dB to 0 dB) with live VU meters
 
