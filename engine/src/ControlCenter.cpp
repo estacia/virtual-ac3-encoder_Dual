@@ -91,6 +91,7 @@ int g_latencyPreset = 2; // 0=Extreme, 1=Fast, 2=Balanced, 3=Safe, 4=Relaxed
 int g_safeFrames = 128;
 bool g_useCustomSafeFrames = false;
 int g_upmixMode = 0; // 0=Dynamic, 6=Dual Stereo, 7=Off, 8=Time-domain Matrix, 9=Matrix + Native 5.1 Untouched
+bool g_speakerLayout4_0 = true; // no Center/Sub; fold native C/LFE into FL/FR for modes 6 and 9
 bool g_loopback = true;
 bool g_outAutoSpdif = true;
 int  g_reloadId = 1;
@@ -435,6 +436,7 @@ void SaveConfiguration(int reloadId = 0) {
 
     const char* upmixes[] = {"dynamic", "front", "3.0", "2.1", "always", "always_front", "dual_stereo", "off", "time_domain", "time_domain_51"};
     cfg["upmix"] = upmixes[std::clamp(g_upmixMode, 0, 9)];
+    cfg["speaker_layout"] = g_speakerLayout4_0 ? "4.0" : "5.1";
 
     WriteKvAtomic(g_configPath, cfg);
     WriteControlFile(false, reloadId);
@@ -514,6 +516,10 @@ void LoadConfiguration() {
     else if (up == "3.0" || up == "front30") g_upmixMode = 2;
     else if (up == "front" || up == "3.1" || up == "frontstage" || up == "center_lfe") g_upmixMode = 1;
     else g_upmixMode = 0; // dynamic surround (or legacy "surround")
+
+    const std::string speakerLayout = cfg["speaker_layout"];
+    g_speakerLayout4_0 = speakerLayout.empty() || speakerLayout == "4.0" ||
+                         speakerLayout == "4" || speakerLayout == "no_center_sub";
 
     // Read control gains
     std::ifstream in{std::filesystem::path(g_controlPath)};
@@ -1301,6 +1307,17 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int) {
                 ImGui::TextDisabled("No FFT/FIFO. Stereo content on a 5.1/7.1 endpoint is matrix-upmixed when discrete channels are inactive; native multichannel is preserved (-66 dB threshold, 3 s hold).");
             else if (g_upmixMode == 9)
                 ImGui::TextDisabled("No FFT/FIFO. Also upmixes front-only stereo on a 5.1/7.1 endpoint; discrete C/LFE/Surround activity preserves native audio (-80 dB threshold, 3 s hold).");
+
+            if (g_upmixMode == 6 || g_upmixMode == 9) {
+                if (ImGui::Checkbox("4.0 Speaker Layout (No Center / No Subwoofer)", &g_speakerLayout4_0)) {
+                    TriggerApplySettings();
+                }
+                if (g_speakerLayout4_0) {
+                    ImGui::TextDisabled("Native 5.1: Center -> FL/FR (-3 dB each); LFE -> FL/FR (ITU +10 dB, then -6 dB per side). SL/SR stay discrete. Stereo inputs do not double-add generated Center/LFE.");
+                } else {
+                    ImGui::TextDisabled("5.1 Preserve: Center and LFE stay in their original channels for a system with Center/Sub speakers.");
+                }
+            }
 
             ImGui::Spacing();
             const char* activeModeStr = (g_outputMode == 0) ? "DTS 5.1" : ((g_outputMode == 1) ? "Dolby Digital (AC3)" : "PCM Stereo");
