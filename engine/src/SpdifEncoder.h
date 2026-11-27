@@ -162,7 +162,7 @@ private:
   bool             useFilter_ = false;
   bool             useDts_ = false;
   bool             timeDomain_ = false;
-  bool             timeDomainNative51_ = false; // strict mode: only matrix-upmix 2-channel input
+  bool             timeDomainNative51_ = false; // content-aware native-channel protection with lower detection threshold
   float            lfeFilterState_ = 0.0f;
   AVFilterGraph*   graph_     = nullptr;
   AVFilterContext* fsrc_      = nullptr; // abuffer
