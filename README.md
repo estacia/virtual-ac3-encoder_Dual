@@ -17,8 +17,8 @@ A real-time Windows 10/11 software implementation of **Dolby Digital Live (DDL)*
 | **Smart Multi-Layout Upmixing (`5.1` / `3.1` / `3.0` / `2.1`)** | **Dynamic Surround 5.1**, optional **Time-domain Matrix 5.1** (Center + difference rears + one-pole LFE with -10 dB program calibration; no FFT/FIFO), **Dual Stereo Copy**, **Front Stage 3.1**, **Front Stage 3.0**, **Stereo + Sub 2.1**, **Always 5.1 / 3.1**, or **Off**. |
 | **Dynamic Surround Filter Diagnostics** | Reports FFT filter state, active hop size, and live FIFO occupancy. Extreme uses FFmpeg's minimum 1024-sample window (512-sample hop); other presets retain 4096. Optional Time-domain Matrix mode bypasses the FFT/FIFO entirely. |
 | **Dolby Control Center (DX11 GUI)** | Hardware-accelerated **Dear ImGui + DirectX 11** dark studio UI with **60 FPS 6-channel VU meters** (peak hold + dB readouts), per-speaker level trims (`-60 dB` to `0 dB` + mute), live hot-reload (zero audio interruption when changing modes/trims), and system tray integration. |
-| **5-Tier Latency Presets** | **Extreme**, **Fast**, **Balanced** (default), **Safe**, and **Relaxed** select progressively larger pre-roll cushions. AC-3 Extreme uses 128 samples and a 1024-sample Surround FFT window. An optional custom SafeFrames control allows 32–1536 samples. Exclusive S/PDIF requests a 256-frame render period (~5.33 ms at 48 kHz), streams each complete AC-3 burst over successive buffers, and falls back to a one-burst buffer when unsupported. Encoding runs on a worker thread ahead of the render deadline. |
-| **256-Sample Incremental DSP** | The capture ring is consumed in **256-sample blocks** (~5.33 ms at 48 kHz). Each block is conditioned immediately and appended to a processed-PCM FIFO; only a complete codec frame (**1536 samples AC-3 / 512 samples DTS**) is passed to the codec. This overlaps DSP work with continued PCM arrival without changing AC-3 framing or IEC 61937 burst format. |
+| **5-Tier Latency Presets** | **Extreme**, **Fast**, **Balanced** (default), **Safe**, and **Relaxed** select progressively larger pre-roll cushions. AC-3 Extreme uses a 128-frame input safety cushion and a 1024-sample Surround FFT window. An optional custom SafeFrames control allows 32–1536 samples. Exclusive S/PDIF first attempts a low-latency period of at least 128 frames (~2.67 ms at 48 kHz), then retries the configured 256-frame period and finally a one-burst buffer when needed. Complete AC-3 bursts are streamed over successive render buffers, and encoding runs on a worker thread ahead of the render deadline. |
+| **128-Sample Incremental DSP** | The capture ring is consumed in **128-sample blocks** (~2.67 ms at 48 kHz). Each block is conditioned immediately and copied directly into its codec-frame staging buffer; the intermediate processed-PCM FIFO is eliminated. Only a complete codec frame (**1536 samples AC-3 / 512 samples DTS**) is passed to the codec. This overlaps DSP work with continued PCM arrival without changing AC-3 framing or IEC 61937 burst format. |
 | **Flexible Audio Capture** | Event-driven loopback capture on Windows 10 1703+ (with a short compatibility poll on older Windows); works out-of-the-box with **Secure Boot ON** via **[VB-CABLE](https://vb-audio.com/Cable/)** (WASAPI loopback or recording capture), or with the included **WDK WaveRT Virtual 5.1 Driver** (`driver/`). |
 
 ---
@@ -38,9 +38,9 @@ flowchart LR
     subgraph Engine["Real-Time Engine (engine.exe)"]
         Cap["WasapiCapture\n(Loopback or Event Capture)"]
         Ring["Lock-Free SPSC RingBuffer\n(Pre-Roll Cushion + Drift Trim)"]
-        Chunk["256-sample PCM blocks\n(~5.33 ms at 48 kHz)"]
+        Chunk["128-sample PCM blocks\n(~2.67 ms at 48 kHz)"]
         DSP["Incremental DSP\n(Upmix + Trims per block)"]
-        Accum["Processed PCM FIFO\n(AC-3 1536 / DTS 512 samples)"]
+        Accum["Direct codec-frame staging\n(AC-3 1536 / DTS 512 samples)"]
         Enc{"Output Mode"}
         AC3["FFmpeg AC-3 Encoder\n1536 frames -> 6144B IEC 61937"]
         DTS["FFmpeg DCA (DTS) Encoder\n512 frames -> 2048B IEC 61937"]
@@ -71,7 +71,7 @@ flowchart LR
 
 ```mermaid
 flowchart TD
-    In["Incoming PCM Block\n(256 samples; 2.0 or 5.1 PCM)"] --> Mode{"Selected Upmix Mode"}
+    In["Incoming PCM Block\n(128 samples; 2.0 or 5.1 PCM)"] --> Mode{"Selected Upmix Mode"}
 
     Mode -->|Off| SwrPass["libswresample Rematrix\n(Direct Pass-Through)"]
     Mode -->|Dual Stereo Copy| Copy["Direct Copy: FL->SL, FR->SR\n(Center/LFE silent; native 5.1 untouched)"]

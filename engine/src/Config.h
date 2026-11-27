@@ -36,7 +36,7 @@ struct Config
     if (dts)
     {
       // DTS uses 512-sample codec frames. This value now controls additional
-      // input-ring jitter margin; the incremental DSP quantum remains 256 samples.
+      // input-ring jitter margin; the incremental DSP quantum is 128 samples.
       if (latencyMode == "extreme" || latencyMode == "ultra")
         return 512;
       if (latencyMode == "fast" || latencyMode == "low")
@@ -49,7 +49,7 @@ struct Config
     }
 
     // AC-3 remains a 1536-sample codec frame (32 ms at 48 kHz), but input DSP
-    // runs in 256-sample blocks. This value is additional ring-buffer jitter margin.
+    // runs in 128-sample blocks. This value is additional ring-buffer jitter margin.
     if (latencyMode == "extreme" || latencyMode == "ultra")
       return 128;
     if (latencyMode == "fast" || latencyMode == "low")

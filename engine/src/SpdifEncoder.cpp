@@ -118,39 +118,40 @@ void SpdifEncoder::ApplyTimeDomainUpmix(AVFrame* target)
   }
 }
 
-void SpdifEncoder::ApplyChannelGains(AVFrame* target)
+void SpdifEncoder::ApplyChannelGainsAndComputeLevels(AVFrame* target)
 {
   if (!target || !target->extended_data || !codecCtx_)
     return;
   const int channels = std::min(6, codecCtx_->ch_layout.nb_channels);
   for (int ch = 0; ch < channels; ++ch)
   {
-    const float gain = channelGainLinear_[static_cast<size_t>(ch)].load(std::memory_order_relaxed);
-    if (gain >= 0.999999f) continue;
     float* samples = reinterpret_cast<float*>(target->extended_data[ch]);
     if (!samples) continue;
-    if (gain <= 0.0f) std::fill_n(samples, target->nb_samples, 0.0f);
-    else for (int i = 0; i < target->nb_samples; ++i) samples[i] *= gain;
-  }
-}
 
-void SpdifEncoder::ComputeLevels(AVFrame* target)
-{
-  if (!target || !target->extended_data || !codecCtx_)
-    return;
-  const int channels = std::min(6, codecCtx_->ch_layout.nb_channels);
-  for (int ch = 0; ch < channels; ++ch)
-  {
-    const float* s = reinterpret_cast<const float*>(target->extended_data[ch]);
-    if (!s) continue;
+    const float gain = channelGainLinear_[static_cast<size_t>(ch)].load(std::memory_order_relaxed);
     float peak = 0.0f;
     double sumSq = 0.0;
-    for (int i = 0; i < target->nb_samples; ++i)
+    if (gain <= 0.0f)
     {
-      const float a = std::fabs(s[i]);
-      peak = std::max(peak, a);
-      sumSq += static_cast<double>(a) * a;
+      std::fill_n(samples, target->nb_samples, 0.0f);
     }
+    else
+    {
+      const bool applyGain = gain < 0.999999f;
+      for (int i = 0; i < target->nb_samples; ++i)
+      {
+        float sample = samples[i];
+        if (applyGain)
+        {
+          sample *= gain;
+          samples[i] = sample;
+        }
+        const float magnitude = std::fabs(sample);
+        peak = std::max(peak, magnitude);
+        sumSq += static_cast<double>(magnitude) * magnitude;
+      }
+    }
+
     const float rms = target->nb_samples > 0
         ? static_cast<float>(std::sqrt(sumSq / target->nb_samples)) : 0.0f;
     peakLevels_[static_cast<size_t>(ch)].store(peak, std::memory_order_relaxed);
@@ -210,6 +211,13 @@ bool SpdifEncoder::Init(const Params& p)
   }
 
   framesPerPacket_ = codecCtx_->frame_size; // 1536 for AC3, 512 for DTS
+  if (framesPerPacket_ <= 0 || (framesPerPacket_ % kPcmChunkFrames) != 0)
+  {
+    std::fprintf(stderr, "[SpdifEncoder] codec frame size %d is not divisible by the %d-sample DSP quantum\n",
+                 framesPerPacket_, kPcmChunkFrames);
+    return false;
+  }
+  processedFrames_ = 0;
 
   // Scratch frame holding the planar-float 5.1 samples. Both the swr path and the
   // surround-filter path fill this.
@@ -230,10 +238,6 @@ bool SpdifEncoder::Init(const Params& p)
   chunkFrame_->nb_samples = kPcmChunkFrames;
   rc = av_frame_get_buffer(chunkFrame_, 0);
   if (rc < 0) { LogAv("av_frame_get_buffer(chunk)", rc); return false; }
-
-  processedFifo_ = av_audio_fifo_alloc(
-      AV_SAMPLE_FMT_FLTP, codecCtx_->ch_layout.nb_channels, framesPerPacket_ * 4);
-  if (!processedFifo_) return false;
 
   if (useDts_)
   {
@@ -377,7 +381,7 @@ void SpdifEncoder::Close()
   surroundWindowSize_ = 4096;
   surroundHopFrames_ = kSurroundFilterHopFrames;
   if (fifo_)      { av_audio_fifo_free(fifo_); fifo_ = nullptr; }
-  if (processedFifo_) { av_audio_fifo_free(processedFifo_); processedFifo_ = nullptr; }
+  processedFrames_ = 0;
   if (filtFrame_) av_frame_free(&filtFrame_);
   if (chunkFrame_) av_frame_free(&chunkFrame_);
   useFilter_ = false;
@@ -407,6 +411,7 @@ void SpdifEncoder::Close()
   if (codecCtx_)  avcodec_free_context(&codecCtx_);
   av_channel_layout_uninit(&inLayout_);
   framesPerPacket_ = 0;
+  processedFrames_ = 0;
   nextPts_ = 0;
 }
 
@@ -486,7 +491,7 @@ bool SpdifEncoder::BuildFilterGraph()
 
   filterInputFrame_->format = inSampleFmt_;
   filterInputFrame_->sample_rate = sampleRate_;
-  filterInputFrame_->nb_samples = framesPerPacket_;
+  filterInputFrame_->nb_samples = kPcmChunkFrames;
   rc = av_channel_layout_copy(&filterInputFrame_->ch_layout, &filterInLayout_);
   if (rc < 0) { LogAv("av_channel_layout_copy(filter input)", rc); return false; }
   rc = av_frame_get_buffer(filterInputFrame_, 0);
@@ -497,10 +502,13 @@ bool SpdifEncoder::BuildFilterGraph()
   // both 1536-sample AC3 and 512-sample DTS packets never underrun between FFT hops.
   const int primeTarget = std::max(framesPerPacket_, surroundHopFrames_);
   const int inBytes =
-      framesPerPacket_ * filterInLayout_.nb_channels * av_get_bytes_per_sample(inSampleFmt_);
+      kPcmChunkFrames * filterInLayout_.nb_channels * av_get_bytes_per_sample(inSampleFmt_);
   std::vector<uint8_t> silence(static_cast<size_t>(inBytes), 0);
-  for (int guard = 0; guard < 64 && av_audio_fifo_size(fifo_) < primeTarget; ++guard)
-    if (!FeedFilter(silence.data()))
+  // Keep the same maximum priming budget as the old codec-sized loop, but feed the
+  // filter in 128-sample quanta to match the smaller preallocated input frame.
+  const int maxPrimeBlocks = 64 * (framesPerPacket_ / kPcmChunkFrames);
+  for (int guard = 0; guard < maxPrimeBlocks && av_audio_fifo_size(fifo_) < primeTarget; ++guard)
+    if (!FeedFilterFrames(silence.data(), kPcmChunkFrames))
       break;
 
   const char* modeName = isFront30 ? "3.0 front stage" : (isSub21 ? "2.1 stereo+sub" : (isFront31 ? "3.1 front stage (Center+Sub)" : "surround"));
@@ -512,14 +520,9 @@ bool SpdifEncoder::BuildFilterGraph()
   return true;
 }
 
-bool SpdifEncoder::FeedFilter(const uint8_t* in)
-{
-  return FeedFilterFrames(in, framesPerPacket_);
-}
-
 bool SpdifEncoder::FeedFilterFrames(const uint8_t* in, int inputFrames)
 {
-  if (!in || inputFrames <= 0 || inputFrames > framesPerPacket_ ||
+  if (!in || inputFrames <= 0 || inputFrames > kPcmChunkFrames ||
       !filterInputFrame_ || !fsrc_ || !fsink_)
     return false;
 
@@ -581,7 +584,7 @@ int SpdifEncoder::EncodePacket(const uint8_t* in, uint8_t* outBuf, int outSize)
 int SpdifEncoder::EncodeChunk(const uint8_t* in, int inputFrames,
                               uint8_t* outBuf, int outSize)
 {
-  if (!codecCtx_ || !in || !chunkFrame_ || !processedFifo_ ||
+  if (!codecCtx_ || !in || !chunkFrame_ || !frame_ ||
       inputFrames != kPcmChunkFrames || outSize < kMaxBytesPerPacket)
     return -1;
 
@@ -775,32 +778,32 @@ int SpdifEncoder::EncodeChunk(const uint8_t* in, int inputFrames,
     }
   }
 
-  ApplyChannelGains(chunkFrame_);
-  ComputeLevels(chunkFrame_);
+  ApplyChannelGainsAndComputeLevels(chunkFrame_);
 
-  if (av_audio_fifo_realloc(processedFifo_,
-          av_audio_fifo_size(processedFifo_) + inputFrames) < 0)
+  if (processedFrames_ < 0 || processedFrames_ + inputFrames > framesPerPacket_)
     return -1;
-  const int written = av_audio_fifo_write(
-      processedFifo_, reinterpret_cast<void**>(chunkFrame_->extended_data), inputFrames);
-  if (written != inputFrames)
+  if (processedFrames_ == 0 && av_frame_make_writable(frame_) < 0)
+    return -1;
+
+  const size_t sampleBytes = static_cast<size_t>(inputFrames) * sizeof(float);
+  const size_t dstOffsetBytes = static_cast<size_t>(processedFrames_) * sizeof(float);
+  const int outputChannels = codecCtx_->ch_layout.nb_channels;
+  for (int ch = 0; ch < outputChannels; ++ch)
   {
-    if (written < 0) LogAv("av_audio_fifo_write(processed)", written);
-    return -1;
+    std::memcpy(frame_->extended_data[ch] + dstOffsetBytes,
+                chunkFrame_->extended_data[ch], sampleBytes);
   }
 
-  if (av_audio_fifo_size(processedFifo_) < framesPerPacket_) return 0;
-  if (av_frame_make_writable(frame_) < 0) return -1;
-  const int read = av_audio_fifo_read(
-      processedFifo_, reinterpret_cast<void**>(frame_->extended_data), framesPerPacket_);
-  if (read != framesPerPacket_)
-  {
-    if (read < 0) LogAv("av_audio_fifo_read(processed)", read);
+  processedFrames_ += inputFrames;
+  if (processedFrames_ < framesPerPacket_)
+    return 0;
+  if (processedFrames_ != framesPerPacket_)
     return -1;
-  }
 
+  frame_->nb_samples = framesPerPacket_;
   frame_->pts = nextPts_;
   nextPts_ += framesPerPacket_;
+  processedFrames_ = 0;
   return EncodeFrameToBurst(outBuf, outSize);
 }
 
