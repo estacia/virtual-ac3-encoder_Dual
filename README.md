@@ -130,8 +130,8 @@ Download the latest release from **[Releases](https://github.com/PatalJunior/vir
 - **Stereo + Sub 2.1 (Bookshelf + Subwoofer)**: Extracts low-frequency bass (`< 140 Hz`) to the **Subwoofer (LFE)** while folding centered vocals back into **Front Left & Right** and keeping Center and rear surrounds silent.
 - **Always Surround 5.1 / Always Front Stage 3.1**: Forces upmixing unconditionally on all inputs.
 - **Dual Stereo Copy**: For stereo sources, copies Front Left directly to Surround Left and Front Right directly to Surround Right. Center and LFE are silent. The mode uses no matrix/FFT upmix filter and leaves detected native 5.1 content unchanged.
-- **Time-domain Matrix 5.1**: Applies a low-latency time-domain matrix to stereo content. When the input endpoint is configured as 5.1, front-only content can also be detected as stereo and matrix-upmixed.
-- **Time-domain Matrix + Native 5.1 Untouched**: Applies the same matrix only when the configured input endpoint is exactly 2-channel. Any multichannel endpoint (5.1/7.1) bypasses the matrix, even when only FL/FR currently carry audio. Select this when preserving a 5.1-configured source layout is more important than upmixing stereo-padded content.
+- **Time-domain Matrix 5.1**: Applies a low-latency time-domain matrix to 2-channel input and to stereo content carried by a 5.1/7.1 endpoint. It detects active Center/LFE/Surround channels and bypasses the matrix for native multichannel material (-66 dBFS RMS threshold with a 3-second protection hold).
+- **Time-domain Matrix + Native 5.1 Untouched**: Also upmixes stereo when a 5.1/7.1 endpoint carries only FL/FR. It uses a more conservative -80 dBFS RMS threshold plus a 3-second protection hold, so quieter discrete Center/LFE/Surround signals still preserve native 5.1/7.1 without matrix remapping.
 - **Off**: Pure 1:1 channel mapping with no upmix filter.
 
 ### Speaker Level Trims & Master Release
