@@ -46,6 +46,14 @@ void SpdifEncoder::GetChannelLevels(float outPeaks[6], float outRms[6]) const
 
 SpdifEncoder::FilterStatus SpdifEncoder::GetFilterStatus() const
 {
+  if (timeDomain_)
+  {
+    if (!timeDomainMatrixDetected_)
+      return FilterStatus::TimeDomainWaiting;
+    return timeDomainMatrixApplied_
+        ? FilterStatus::TimeDomainMatrix
+        : FilterStatus::TimeDomainNativeBypass;
+  }
   if (useFilter_)
     return FilterStatus::StereoUpmix;
   if (!dynamicUpmix_)
@@ -272,6 +280,8 @@ bool SpdifEncoder::Init(const Params& p)
   alwaysUpmix_ = (p.upmix == Upmix::Always || p.upmix == Upmix::AlwaysFront);
   timeDomain_ = isTimeDomain;
   timeDomainNative51_ = (p.upmix == Upmix::TimeDomainNative51);
+  timeDomainMatrixDetected_ = false;
+  timeDomainMatrixApplied_ = false;
   lfeFilterState_ = 0.0f;
   useFilter_ = (wantUpmix && inLayout_.nb_channels <= 2);
   dynamicUpmix_ = (wantUpmix && inLayout_.nb_channels > 2);
@@ -390,6 +400,8 @@ void SpdifEncoder::Close()
   useDts_ = false;
   timeDomain_ = false;
   timeDomainNative51_ = false;
+  timeDomainMatrixDetected_ = false;
+  timeDomainMatrixApplied_ = false;
   lfeFilterState_ = 0.0f;
   dynamicUpmix_ = false;
   alwaysUpmix_ = false;
@@ -691,6 +703,8 @@ int SpdifEncoder::EncodeChunk(const uint8_t* in, int inputFrames,
     const double nativeProtectionThreshold = timeDomainNative51_ ? 0.0001 : 0.0005;
     const bool stereoSource = (inLayout_.nb_channels <= 2) ||
         IsEffectivelyStereo(in, inputFrames, nullptr, nativeProtectionThreshold);
+    timeDomainMatrixDetected_ = true;
+    timeDomainMatrixApplied_ = stereoSource;
     if (stereoSource) ApplyTimeDomainUpmix(chunkFrame_);
     haveProcessedChunk = true;
   }
