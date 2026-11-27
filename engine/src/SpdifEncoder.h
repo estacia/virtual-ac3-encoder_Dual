@@ -47,6 +47,7 @@ public:
     TimeDomainMatrix = 7,
     TimeDomainNativeBypass = 8,
     SpeakerLayout4_0FoldDown = 9,
+    SpeakerLayout4_0Upmix = 10,
   };
 
   static constexpr int kSurroundFilterHopFrames = 2048;
@@ -175,6 +176,7 @@ private:
   bool             timeDomainMatrixApplied_ = false;
   bool             foldDownCenterLfeToFront_ = false;
   bool             speakerFoldDownActive_ = false;
+  bool             speakerLayout4_0UpmixActive_ = false;
   float            foldDownLimiterGain_ = 1.0f;
   float            lfeFilterState_ = 0.0f;
   AVFilterGraph*   graph_     = nullptr;
