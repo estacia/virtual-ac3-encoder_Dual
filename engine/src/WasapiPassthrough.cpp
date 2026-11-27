@@ -744,7 +744,7 @@ void WasapiPassthrough::ThreadProc()
       if (driftFrameAccumulator_ >= capFmt_.sampleRate)
       {
         const uint32_t hysteresis = std::max<uint32_t>(
-            static_cast<uint32_t>(SpdifEncoder::kPcmChunkFrames), params_.safeFrames);
+            static_cast<uint32_t>(framesPerPacket_), params_.safeFrames);
         if (minAvail_ != 0xFFFFFFFFu && minAvail_ > desired + hysteresis)
         {
           const uint32_t excess = minAvail_ - (desired + hysteresis / 2);
