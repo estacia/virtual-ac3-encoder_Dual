@@ -37,6 +37,7 @@ public:
     uint32_t safeFrames = 1536;    // PCM ring cushion held beyond each 128-sample DSP block
     uint32_t renderPeriodFrames = 256; // ~5.33 ms at 48 kHz; endpoint may force fallback
     SpdifEncoder::Upmix upmix = SpdifEncoder::Upmix::Off;
+    bool     foldDownCenterLfeToFront = false; // 4.0 speaker layout for modes that preserve native 5.1
     int      surroundWindowSize = 4096; // 1024 (512-sample hop) for low-latency Extreme mode
     bool     upmixSurround = false; // legacy compatibility flag (mapped to upmix if true)
   };
