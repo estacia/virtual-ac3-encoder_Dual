@@ -88,79 +88,71 @@ void SpdifEncoder::SetChannelGainsDb(const std::array<float, 6>& gainsDb)
   }
 }
 
-void SpdifEncoder::ApplyTimeDomainUpmix()
+void SpdifEncoder::ApplyTimeDomainUpmix(AVFrame* target)
 {
-  if (!frame_ || !frame_->extended_data || codecCtx_->ch_layout.nb_channels < 6)
+  if (!target || !target->extended_data || !codecCtx_ || codecCtx_->ch_layout.nb_channels < 6)
     return;
-  float* fl  = reinterpret_cast<float*>(frame_->extended_data[0]);
-  float* fr  = reinterpret_cast<float*>(frame_->extended_data[1]);
-  float* fc  = reinterpret_cast<float*>(frame_->extended_data[2]);
-  float* lfe = reinterpret_cast<float*>(frame_->extended_data[3]);
-  float* sl  = reinterpret_cast<float*>(frame_->extended_data[4]);
-  float* sr  = reinterpret_cast<float*>(frame_->extended_data[5]);
+  float* fl  = reinterpret_cast<float*>(target->extended_data[0]);
+  float* fr  = reinterpret_cast<float*>(target->extended_data[1]);
+  float* fc  = reinterpret_cast<float*>(target->extended_data[2]);
+  float* lfe = reinterpret_cast<float*>(target->extended_data[3]);
+  float* sl  = reinterpret_cast<float*>(target->extended_data[4]);
+  float* sr  = reinterpret_cast<float*>(target->extended_data[5]);
   if (!fl || !fr || !fc || !lfe || !sl || !sr)
     return;
 
-  // Direct time-domain matrix; no FFT window or filter FIFO.
+  // The filter state persists across 256-sample calls.
   const float alpha = 1.0f - std::exp(-2.0f * 3.14159265358979323846f *
                                       120.0f / static_cast<float>(sampleRate_));
   constexpr float kMinus3dB = 0.70710678f;
-  for (int i = 0; i < frame_->nb_samples; ++i)
+  for (int i = 0; i < target->nb_samples; ++i)
   {
-    const float left = fl[i];
-    const float right = fr[i];
+    const float left = fl[i], right = fr[i];
     const float mid = 0.5f * (left + right);
     const float side = 0.5f * (left - right);
     fc[i] = mid * kMinus3dB;
     sl[i] = side * kMinus3dB;
     sr[i] = -side * kMinus3dB;
     lfeFilterState_ += alpha * (mid - lfeFilterState_);
-    // AC-3 LFE playback conventionally receives +10 dB bass-management gain.
-    // Encode the derived program signal 10 dB below the main-channel reference.
-    constexpr float kLfeProgramGain = 0.31622777f; // 10^(-10/20)
-    lfe[i] = lfeFilterState_ * kLfeProgramGain;
+    lfe[i] = lfeFilterState_ * 0.31622777f;
   }
 }
 
-void SpdifEncoder::ApplyChannelGains()
+void SpdifEncoder::ApplyChannelGains(AVFrame* target)
 {
-  if (!frame_ || !frame_->extended_data || !codecCtx_)
+  if (!target || !target->extended_data || !codecCtx_)
     return;
   const int channels = std::min(6, codecCtx_->ch_layout.nb_channels);
   for (int ch = 0; ch < channels; ++ch)
   {
     const float gain = channelGainLinear_[static_cast<size_t>(ch)].load(std::memory_order_relaxed);
-    if (gain >= 0.999999f)
-      continue;
-    float* samples = reinterpret_cast<float*>(frame_->extended_data[ch]);
-    if (!samples)
-      continue;
-    if (gain <= 0.0f)
-      std::fill_n(samples, frame_->nb_samples, 0.0f);
-    else
-      for (int i = 0; i < frame_->nb_samples; ++i)
-        samples[i] *= gain;
+    if (gain >= 0.999999f) continue;
+    float* samples = reinterpret_cast<float*>(target->extended_data[ch]);
+    if (!samples) continue;
+    if (gain <= 0.0f) std::fill_n(samples, target->nb_samples, 0.0f);
+    else for (int i = 0; i < target->nb_samples; ++i) samples[i] *= gain;
   }
 }
 
-void SpdifEncoder::ComputeLevels()
+void SpdifEncoder::ComputeLevels(AVFrame* target)
 {
-  if (!frame_ || !frame_->extended_data || !codecCtx_)
+  if (!target || !target->extended_data || !codecCtx_)
     return;
   const int channels = std::min(6, codecCtx_->ch_layout.nb_channels);
   for (int ch = 0; ch < channels; ++ch)
   {
-    const float* s = reinterpret_cast<const float*>(frame_->extended_data[ch]);
+    const float* s = reinterpret_cast<const float*>(target->extended_data[ch]);
     if (!s) continue;
     float peak = 0.0f;
     double sumSq = 0.0;
-    for (int i = 0; i < frame_->nb_samples; ++i)
+    for (int i = 0; i < target->nb_samples; ++i)
     {
       const float a = std::fabs(s[i]);
-      if (a > peak) peak = a;
+      peak = std::max(peak, a);
       sumSq += static_cast<double>(a) * a;
     }
-    const float rms = frame_->nb_samples > 0 ? static_cast<float>(std::sqrt(sumSq / frame_->nb_samples)) : 0.0f;
+    const float rms = target->nb_samples > 0
+        ? static_cast<float>(std::sqrt(sumSq / target->nb_samples)) : 0.0f;
     peakLevels_[static_cast<size_t>(ch)].store(peak, std::memory_order_relaxed);
     rmsLevels_[static_cast<size_t>(ch)].store(rms, std::memory_order_relaxed);
   }
@@ -230,6 +222,19 @@ bool SpdifEncoder::Init(const Params& p)
   rc = av_frame_get_buffer(frame_, 0);
   if (rc < 0) { LogAv("av_frame_get_buffer", rc); return false; }
 
+  chunkFrame_ = av_frame_alloc();
+  if (!chunkFrame_) return false;
+  chunkFrame_->format = AV_SAMPLE_FMT_FLTP;
+  av_channel_layout_copy(&chunkFrame_->ch_layout, &codecCtx_->ch_layout);
+  chunkFrame_->sample_rate = sampleRate_;
+  chunkFrame_->nb_samples = kPcmChunkFrames;
+  rc = av_frame_get_buffer(chunkFrame_, 0);
+  if (rc < 0) { LogAv("av_frame_get_buffer(chunk)", rc); return false; }
+
+  processedFifo_ = av_audio_fifo_alloc(
+      AV_SAMPLE_FMT_FLTP, codecCtx_->ch_layout.nb_channels, framesPerPacket_ * 4);
+  if (!processedFifo_) return false;
+
   if (useDts_)
   {
     dtsFrame_ = av_frame_alloc();
@@ -288,7 +293,7 @@ bool SpdifEncoder::Init(const Params& p)
     else
     {
       const int bps = av_get_bytes_per_sample(inSampleFmt_);
-      stereoExtract_.resize(static_cast<size_t>(framesPerPacket_) * 2 * bps);
+      stereoExtract_.resize(static_cast<size_t>(kPcmChunkFrames) * 2 * bps);
     }
   }
   if (!useFilter_)
@@ -372,7 +377,9 @@ void SpdifEncoder::Close()
   surroundWindowSize_ = 4096;
   surroundHopFrames_ = kSurroundFilterHopFrames;
   if (fifo_)      { av_audio_fifo_free(fifo_); fifo_ = nullptr; }
+  if (processedFifo_) { av_audio_fifo_free(processedFifo_); processedFifo_ = nullptr; }
   if (filtFrame_) av_frame_free(&filtFrame_);
+  if (chunkFrame_) av_frame_free(&chunkFrame_);
   useFilter_ = false;
   useDts_ = false;
   timeDomain_ = false;
@@ -507,69 +514,117 @@ bool SpdifEncoder::BuildFilterGraph()
 
 bool SpdifEncoder::FeedFilter(const uint8_t* in)
 {
-  if (!in || !filterInputFrame_ || !fsrc_ || !fsink_)
+  return FeedFilterFrames(in, framesPerPacket_);
+}
+
+bool SpdifEncoder::FeedFilterFrames(const uint8_t* in, int inputFrames)
+{
+  if (!in || inputFrames <= 0 || inputFrames > framesPerPacket_ ||
+      !filterInputFrame_ || !fsrc_ || !fsink_)
     return false;
 
   const int inBytes =
-      framesPerPacket_ * filterInLayout_.nb_channels * av_get_bytes_per_sample(inSampleFmt_);
-
-  // Reuse one preallocated frame instead of allocating a new AVFrame and AVBuffer
-  // for every AC-3 packet. KEEP_REF lets the filter graph retain its own reference;
-  // after draining the sink, the next make_writable normally reuses the same buffer.
+      inputFrames * filterInLayout_.nb_channels * av_get_bytes_per_sample(inSampleFmt_);
   int rc = av_frame_make_writable(filterInputFrame_);
   if (rc < 0) { LogAv("av_frame_make_writable(filter input)", rc); return false; }
+  filterInputFrame_->nb_samples = inputFrames;
   std::memcpy(filterInputFrame_->data[0], in, static_cast<size_t>(inBytes));
   filterInputFrame_->pts = filterInputPts_;
 
   rc = av_buffersrc_add_frame_flags(fsrc_, filterInputFrame_, AV_BUFFERSRC_FLAG_KEEP_REF);
   if (rc < 0) { LogAv("av_buffersrc_add_frame_flags", rc); return false; }
-  filterInputPts_ += framesPerPacket_;
-  filterInputFramesProcessed_ += static_cast<uint64_t>(framesPerPacket_);
+  filterInputPts_ += inputFrames;
+  filterInputFramesProcessed_ += static_cast<uint64_t>(inputFrames);
 
   for (;;)
   {
     rc = av_buffersink_get_frame(fsink_, filtFrame_);
-    if (rc == AVERROR(EAGAIN) || rc == AVERROR_EOF)
-      break;
+    if (rc == AVERROR(EAGAIN) || rc == AVERROR_EOF) break;
     if (rc < 0) { LogAv("av_buffersink_get_frame", rc); return false; }
-    int w = av_audio_fifo_write(fifo_, reinterpret_cast<void**>(filtFrame_->data),
-                                filtFrame_->nb_samples);
+    const int expected = filtFrame_->nb_samples;
+    const int written = av_audio_fifo_write(
+        fifo_, reinterpret_cast<void**>(filtFrame_->extended_data), expected);
     av_frame_unref(filtFrame_);
-    if (w < 0) { LogAv("av_audio_fifo_write", w); return false; }
+    if (written != expected)
+    {
+      if (written < 0) LogAv("av_audio_fifo_write", written);
+      else std::fprintf(stderr, "[SpdifEncoder] short filter FIFO write (%d/%d)\n", written, expected);
+      return false;
+    }
   }
   return true;
 }
 
 int SpdifEncoder::EncodePacket(const uint8_t* in, uint8_t* outBuf, int outSize)
 {
-  if (!codecCtx_)
+  if (!codecCtx_ || !in || outSize < kMaxBytesPerPacket ||
+      framesPerPacket_ <= 0 || (framesPerPacket_ % kPcmChunkFrames) != 0)
     return -1;
-  if (outSize < kMaxBytesPerPacket)
+
+  const int bytesPerSample = av_get_bytes_per_sample(inSampleFmt_);
+  if (bytesPerSample <= 0 || InChannels() <= 0)
+    return -1;
+  const size_t inputFrameBytes = static_cast<size_t>(bytesPerSample) * InChannels();
+
+  int encodedBytes = 0;
+  for (int offset = 0; offset < framesPerPacket_; offset += kPcmChunkFrames)
+  {
+    const int n = EncodeChunk(
+        in + static_cast<size_t>(offset) * inputFrameBytes,
+        kPcmChunkFrames, outBuf, outSize);
+    if (n < 0) return n;
+    if (n > 0) encodedBytes = n;
+  }
+  return encodedBytes;
+}
+
+int SpdifEncoder::EncodeChunk(const uint8_t* in, int inputFrames,
+                              uint8_t* outBuf, int outSize)
+{
+  if (!codecCtx_ || !in || !chunkFrame_ || !processedFifo_ ||
+      inputFrames != kPcmChunkFrames || outSize < kMaxBytesPerPacket)
     return -1;
 
   bool usedUpmixFilter = false;
+  bool haveProcessedChunk = false;
+
+  auto convertDirect = [&](SwrContext* converter) -> bool {
+    if (!converter || av_frame_make_writable(chunkFrame_) < 0) return false;
+    const uint8_t* inputPlanes[1] = { in };
+    const int got = swr_convert(converter, chunkFrame_->extended_data,
+                                inputFrames, inputPlanes, inputFrames);
+    if (got < 0) { LogAv("swr_convert(chunk)", got); return false; }
+    if (got < inputFrames)
+    {
+      const size_t tailBytes = static_cast<size_t>(inputFrames - got) * sizeof(float);
+      for (int ch = 0; ch < codecCtx_->ch_layout.nb_channels; ++ch)
+        std::memset(chunkFrame_->extended_data[ch] + static_cast<size_t>(got) * sizeof(float),
+                    0, tailBytes);
+    }
+    return true;
+  };
+
+  auto readFilterChunk = [&]() -> bool {
+    if (!fifo_ || av_audio_fifo_size(fifo_) < inputFrames) return false;
+    if (av_frame_make_writable(chunkFrame_) < 0) return false;
+    const int got = av_audio_fifo_read(
+        fifo_, reinterpret_cast<void**>(chunkFrame_->extended_data), inputFrames);
+    return got == inputFrames;
+  };
+
   if (useFilter_)
   {
-    if (!FeedFilter(in))
-      return -1;
-    if (av_audio_fifo_size(fifo_) < framesPerPacket_)
-      return 0;
-    if (av_frame_make_writable(frame_) < 0)
-      return -1;
-    if (av_audio_fifo_read(fifo_, reinterpret_cast<void**>(frame_->data), framesPerPacket_) <
-        framesPerPacket_)
-      return 0;
+    if (!FeedFilterFrames(in, inputFrames)) return -1;
+    if (!readFilterChunk()) return 0;
     usedUpmixFilter = true;
+    haveProcessedChunk = true;
   }
   else if (dynamicUpmix_)
   {
     bool hasDiscreteActivity = false;
-    const bool stereoSource = alwaysUpmix_ || IsEffectivelyStereo(in, &hasDiscreteActivity);
-    const int minPrimedFifo = std::max(framesPerPacket_, surroundHopFrames_);
-    const int maxActiveFifo = minPrimedFifo + framesPerPacket_;
+    const bool stereoSource = alwaysUpmix_ ||
+        IsEffectivelyStereo(in, inputFrames, &hasDiscreteActivity);
 
-    // A live Center/LFE/Surround signal is definitive native multichannel audio.
-    // Do not extract FL/FR or feed the FFT graph while those channels are active.
     if (!alwaysUpmix_ && hasDiscreteActivity)
     {
       if (!dynamicFilterBypassed_)
@@ -585,141 +640,103 @@ int SpdifEncoder::EncodePacket(const uint8_t* in, uint8_t* outBuf, int outSize)
     else
     {
       dynamicFilterBypassed_ = false;
-
-      // During the existing 3-second native-layout hold, front-only samples keep the
-      // filter warm, but are still rendered through the untouched multichannel path.
-      ExtractStereo(in, stereoExtract_.data());
-      if (!FeedFilter(stereoExtract_.data()))
-        return -1;
+      ExtractStereo(in, stereoExtract_.data(), inputFrames);
+      if (!FeedFilterFrames(stereoExtract_.data(), inputFrames)) return -1;
 
       if (dynamicFilterNeedsWarmup_)
       {
-        dynamicFilterWarmupFrames_ =
-            std::max(0, dynamicFilterWarmupFrames_ - framesPerPacket_);
-        // Drop output containing history from before the native 5.1 segment.
+        dynamicFilterWarmupFrames_ = std::max(0, dynamicFilterWarmupFrames_ - inputFrames);
         av_audio_fifo_reset(fifo_);
         dynamicFilterPrimed_ = false;
-        if (dynamicFilterWarmupFrames_ == 0)
-          dynamicFilterNeedsWarmup_ = false;
+        if (dynamicFilterWarmupFrames_ == 0) dynamicFilterNeedsWarmup_ = false;
       }
       else
       {
+        const int maxActiveFifo = std::max(inputFrames, surroundHopFrames_) + framesPerPacket_;
         const int excess = av_audio_fifo_size(fifo_) - maxActiveFifo;
-        if (excess > 0)
-          av_audio_fifo_drain(fifo_, excess);
-        if (av_audio_fifo_size(fifo_) >= minPrimedFifo)
-          dynamicFilterPrimed_ = true;
+        if (excess > 0) av_audio_fifo_drain(fifo_, excess);
+        if (av_audio_fifo_size(fifo_) >= inputFrames) dynamicFilterPrimed_ = true;
       }
     }
 
     if (stereoSource && !dynamicFilterBypassed_ && !dynamicFilterNeedsWarmup_ &&
-        dynamicFilterPrimed_ && av_audio_fifo_size(fifo_) >= framesPerPacket_)
+        dynamicFilterPrimed_ && readFilterChunk())
     {
-      const int excess = av_audio_fifo_size(fifo_) - maxActiveFifo;
-      if (excess > 0)
-        av_audio_fifo_drain(fifo_, excess);
-      if (av_frame_make_writable(frame_) < 0)
-        return -1;
-      if (av_audio_fifo_read(fifo_, reinterpret_cast<void**>(frame_->data), framesPerPacket_) <
-          framesPerPacket_)
-        return 0;
       dynamicFilterActive_ = true;
       usedUpmixFilter = true;
+      haveProcessedChunk = true;
     }
     else
     {
       dynamicFilterActive_ = false;
-      // Until the filter is warm and a complete packet is ready, preserve the direct
-      // input path instead of inserting a silent gap.
-      if (av_frame_make_writable(frame_) < 0)
-        return -1;
-      const uint8_t* inPlanes[1] = { in };
-      const int got = swr_convert(swr_, frame_->data, frame_->nb_samples, inPlanes,
-                                  framesPerPacket_);
-      if (got < 0) { LogAv("swr_convert", got); return -1; }
+      if (!convertDirect(swr_)) return -1;
+      haveProcessedChunk = true;
     }
   }
   else if (timeDomain_)
   {
-    if (av_frame_make_writable(frame_) < 0)
-      return -1;
-    const uint8_t* inPlanes[1] = { in };
-    const int got = swr_convert(swr_, frame_->data, frame_->nb_samples, inPlanes,
-                                framesPerPacket_);
-    if (got < 0) { LogAv("swr_convert(TimeDomain)", got); return -1; }
-    if (got < frame_->nb_samples)
-    {
-      const size_t tailBytes = static_cast<size_t>(frame_->nb_samples - got) * sizeof(float);
-      for (int ch = 0; ch < codecCtx_->ch_layout.nb_channels; ++ch)
-        std::memset(frame_->extended_data[ch] + static_cast<size_t>(got) * sizeof(float),
-                    0, tailBytes);
-    }
-    const bool stereoSource = (inLayout_.nb_channels <= 2) || IsEffectivelyStereo(in);
-    if (stereoSource)
-      ApplyTimeDomainUpmix();
+    if (!convertDirect(swr_)) return -1;
+    const bool stereoSource = (inLayout_.nb_channels <= 2) ||
+                              IsEffectivelyStereo(in, inputFrames);
+    if (stereoSource) ApplyTimeDomainUpmix(chunkFrame_);
+    haveProcessedChunk = true;
   }
   else if (dualStereoSwr_)
   {
-    if (av_frame_make_writable(frame_) < 0)
-      return -1;
-    const uint8_t* inPlanes[1] = { in };
-    uint8_t* stereoPlanes[2] = { frame_->extended_data[0], frame_->extended_data[1] };
-    const int got = swr_convert(dualStereoSwr_, stereoPlanes, frame_->nb_samples,
-                                inPlanes, framesPerPacket_);
-    if (got < 0) { LogAv("swr_convert(DualStereo)", got); return -1; }
+    if (av_frame_make_writable(chunkFrame_) < 0) return -1;
+    const uint8_t* inputPlanes[1] = { in };
+    uint8_t* stereoPlanes[2] = {
+      chunkFrame_->extended_data[0], chunkFrame_->extended_data[1]
+    };
+    const int got = swr_convert(dualStereoSwr_, stereoPlanes, inputFrames,
+                                inputPlanes, inputFrames);
+    if (got < 0) { LogAv("swr_convert(DualStereo chunk)", got); return -1; }
 
-    float* fl  = reinterpret_cast<float*>(frame_->extended_data[0]);
-    float* fr  = reinterpret_cast<float*>(frame_->extended_data[1]);
-    float* fc  = reinterpret_cast<float*>(frame_->extended_data[2]);
-    float* lfe = reinterpret_cast<float*>(frame_->extended_data[3]);
-    float* sl  = reinterpret_cast<float*>(frame_->extended_data[4]);
-    float* sr  = reinterpret_cast<float*>(frame_->extended_data[5]);
-    if (!fl || !fr || !fc || !lfe || !sl || !sr)
-      return -1;
-
+    float* fl  = reinterpret_cast<float*>(chunkFrame_->extended_data[0]);
+    float* fr  = reinterpret_cast<float*>(chunkFrame_->extended_data[1]);
+    float* fc  = reinterpret_cast<float*>(chunkFrame_->extended_data[2]);
+    float* lfe = reinterpret_cast<float*>(chunkFrame_->extended_data[3]);
+    float* sl  = reinterpret_cast<float*>(chunkFrame_->extended_data[4]);
+    float* sr  = reinterpret_cast<float*>(chunkFrame_->extended_data[5]);
+    if (!fl || !fr || !fc || !lfe || !sl || !sr) return -1;
     const size_t convertedBytes = static_cast<size_t>(got) * sizeof(float);
     std::memcpy(sl, fl, convertedBytes);
     std::memcpy(sr, fr, convertedBytes);
-    if (got < frame_->nb_samples)
+    if (got < inputFrames)
     {
-      const size_t tailBytes = static_cast<size_t>(frame_->nb_samples - got) * sizeof(float);
+      const size_t tailBytes = static_cast<size_t>(inputFrames - got) * sizeof(float);
       std::memset(fl + got, 0, tailBytes);
       std::memset(fr + got, 0, tailBytes);
       std::memset(sl + got, 0, tailBytes);
       std::memset(sr + got, 0, tailBytes);
     }
-    std::memset(fc, 0, static_cast<size_t>(frame_->nb_samples) * sizeof(float));
-    std::memset(lfe, 0, static_cast<size_t>(frame_->nb_samples) * sizeof(float));
+    std::memset(fc, 0, static_cast<size_t>(inputFrames) * sizeof(float));
+    std::memset(lfe, 0, static_cast<size_t>(inputFrames) * sizeof(float));
+    haveProcessedChunk = true;
   }
   else
   {
-    if (av_frame_make_writable(frame_) < 0)
-      return -1;
-    const uint8_t* inPlanes[1] = { in };
-    int got = swr_convert(swr_, frame_->data, frame_->nb_samples, inPlanes, framesPerPacket_);
-    if (got < 0) { LogAv("swr_convert", got); return -1; }
-
-    // Stereo-padded multichannel sources still require the discrete-channel
-    // detector; real native 5.1 content remains untouched.
-    const bool stereoSource = dualStereo_ && IsEffectivelyStereo(in);
+    if (!convertDirect(swr_)) return -1;
+    const bool stereoSource = dualStereo_ && IsEffectivelyStereo(in, inputFrames);
     if (stereoSource && codecCtx_->ch_layout.nb_channels >= 6)
     {
-      float* fl  = reinterpret_cast<float*>(frame_->extended_data[0]);
-      float* fr  = reinterpret_cast<float*>(frame_->extended_data[1]);
-      float* fc  = reinterpret_cast<float*>(frame_->extended_data[2]);
-      float* lfe = reinterpret_cast<float*>(frame_->extended_data[3]);
-      float* sl  = reinterpret_cast<float*>(frame_->extended_data[4]);
-      float* sr  = reinterpret_cast<float*>(frame_->extended_data[5]);
-      if (fl && fr && fc && lfe && sl && sr)
-      {
-        const size_t bytes = static_cast<size_t>(frame_->nb_samples) * sizeof(float);
-        std::memcpy(sl, fl, bytes);
-        std::memcpy(sr, fr, bytes);
-        std::memset(fc, 0, bytes);
-        std::memset(lfe, 0, bytes);
-      }
+      float* fl  = reinterpret_cast<float*>(chunkFrame_->extended_data[0]);
+      float* fr  = reinterpret_cast<float*>(chunkFrame_->extended_data[1]);
+      float* fc  = reinterpret_cast<float*>(chunkFrame_->extended_data[2]);
+      float* lfe = reinterpret_cast<float*>(chunkFrame_->extended_data[3]);
+      float* sl  = reinterpret_cast<float*>(chunkFrame_->extended_data[4]);
+      float* sr  = reinterpret_cast<float*>(chunkFrame_->extended_data[5]);
+      if (!fl || !fr || !fc || !lfe || !sl || !sr) return -1;
+      const size_t bytes = static_cast<size_t>(inputFrames) * sizeof(float);
+      std::memcpy(sl, fl, bytes);
+      std::memcpy(sr, fr, bytes);
+      std::memset(fc, 0, bytes);
+      std::memset(lfe, 0, bytes);
     }
+    haveProcessedChunk = true;
   }
+
+  if (!haveProcessedChunk) return 0;
 
   if (usedUpmixFilter && codecCtx_->ch_layout.nb_channels >= 6)
   {
@@ -727,45 +744,60 @@ int SpdifEncoder::EncodePacket(const uint8_t* in, uint8_t* outBuf, int outSize)
     {
       for (int ch : { 4, 5 })
       {
-        float* p = reinterpret_cast<float*>(frame_->extended_data[ch]);
-        if (p)
-          std::fill_n(p, frame_->nb_samples, 0.0f);
+        float* s = reinterpret_cast<float*>(chunkFrame_->extended_data[ch]);
+        if (s) std::fill_n(s, inputFrames, 0.0f);
       }
     }
     else if (upmixMode_ == Upmix::Front30)
     {
       for (int ch : { 3, 4, 5 })
       {
-        float* p = reinterpret_cast<float*>(frame_->extended_data[ch]);
-        if (p)
-          std::fill_n(p, frame_->nb_samples, 0.0f);
+        float* s = reinterpret_cast<float*>(chunkFrame_->extended_data[ch]);
+        if (s) std::fill_n(s, inputFrames, 0.0f);
       }
     }
     else if (upmixMode_ == Upmix::StereoSub21)
     {
-      float* fl = reinterpret_cast<float*>(frame_->extended_data[0]);
-      float* fr = reinterpret_cast<float*>(frame_->extended_data[1]);
-      float* fc = reinterpret_cast<float*>(frame_->extended_data[2]);
+      float* fl = reinterpret_cast<float*>(chunkFrame_->extended_data[0]);
+      float* fr = reinterpret_cast<float*>(chunkFrame_->extended_data[1]);
+      float* fc = reinterpret_cast<float*>(chunkFrame_->extended_data[2]);
       if (fl && fr && fc)
-      {
-        for (int i = 0; i < frame_->nb_samples; ++i)
+        for (int i = 0; i < inputFrames; ++i)
         {
           fl[i] += 0.70710678f * fc[i];
           fr[i] += 0.70710678f * fc[i];
         }
-      }
       for (int ch : { 2, 4, 5 })
       {
-        float* p = reinterpret_cast<float*>(frame_->extended_data[ch]);
-        if (p)
-          std::fill_n(p, frame_->nb_samples, 0.0f);
+        float* s = reinterpret_cast<float*>(chunkFrame_->extended_data[ch]);
+        if (s) std::fill_n(s, inputFrames, 0.0f);
       }
     }
   }
 
-  // Per-channel trim applied to the 5.1 planar-float frame
-  ApplyChannelGains();
-  ComputeLevels();
+  ApplyChannelGains(chunkFrame_);
+  ComputeLevels(chunkFrame_);
+
+  if (av_audio_fifo_realloc(processedFifo_,
+          av_audio_fifo_size(processedFifo_) + inputFrames) < 0)
+    return -1;
+  const int written = av_audio_fifo_write(
+      processedFifo_, reinterpret_cast<void**>(chunkFrame_->extended_data), inputFrames);
+  if (written != inputFrames)
+  {
+    if (written < 0) LogAv("av_audio_fifo_write(processed)", written);
+    return -1;
+  }
+
+  if (av_audio_fifo_size(processedFifo_) < framesPerPacket_) return 0;
+  if (av_frame_make_writable(frame_) < 0) return -1;
+  const int read = av_audio_fifo_read(
+      processedFifo_, reinterpret_cast<void**>(frame_->extended_data), framesPerPacket_);
+  if (read != framesPerPacket_)
+  {
+    if (read < 0) LogAv("av_audio_fifo_read(processed)", read);
+    return -1;
+  }
 
   frame_->pts = nextPts_;
   nextPts_ += framesPerPacket_;
@@ -830,12 +862,15 @@ int SpdifEncoder::WritePacketThunk(void* opaque, const uint8_t* buf, int buf_siz
   return static_cast<SpdifEncoder*>(opaque)->OnWritePacket(buf, buf_size);
 }
 
-bool SpdifEncoder::IsEffectivelyStereo(const uint8_t* in, bool* hasDiscreteActivity) const
+bool SpdifEncoder::IsEffectivelyStereo(const uint8_t* in, int inputFrames,
+                                       bool* hasDiscreteActivity) const
 {
   if (hasDiscreteActivity)
     *hasDiscreteActivity = false;
   const int ch = inLayout_.nb_channels;
   if (ch <= 2)
+    return true;
+  if (!in || inputFrames <= 0)
     return true;
 
   // On a 5.1 / 7.1 endpoint, stereo applications (music players, browsers, Discord, stereo games)
@@ -850,7 +885,7 @@ bool SpdifEncoder::IsEffectivelyStereo(const uint8_t* in, bool* hasDiscreteActiv
   if (inSampleFmt_ == AV_SAMPLE_FMT_FLT)
   {
     const float* f = reinterpret_cast<const float*>(in);
-    for (int i = 0; i < framesPerPacket_; ++i)
+    for (int i = 0; i < inputFrames; ++i)
     {
       const double fl = f[i * ch + 0];
       const double fr = f[i * ch + 1];
@@ -865,7 +900,7 @@ bool SpdifEncoder::IsEffectivelyStereo(const uint8_t* in, bool* hasDiscreteActiv
   else if (inSampleFmt_ == AV_SAMPLE_FMT_S16)
   {
     const int16_t* s = reinterpret_cast<const int16_t*>(in);
-    for (int i = 0; i < framesPerPacket_; ++i)
+    for (int i = 0; i < inputFrames; ++i)
     {
       const double fl = s[i * ch + 0] / 32768.0;
       const double fr = s[i * ch + 1] / 32768.0;
@@ -880,7 +915,7 @@ bool SpdifEncoder::IsEffectivelyStereo(const uint8_t* in, bool* hasDiscreteActiv
   else if (inSampleFmt_ == AV_SAMPLE_FMT_S32)
   {
     const int32_t* s = reinterpret_cast<const int32_t*>(in);
-    for (int i = 0; i < framesPerPacket_; ++i)
+    for (int i = 0; i < inputFrames; ++i)
     {
       const double fl = s[i * ch + 0] / 2147483648.0;
       const double fr = s[i * ch + 1] / 2147483648.0;
@@ -893,8 +928,8 @@ bool SpdifEncoder::IsEffectivelyStereo(const uint8_t* in, bool* hasDiscreteActiv
     }
   }
 
-  const double discreteRms = std::sqrt(discreteSumSq / (framesPerPacket_ * discreteChannels));
-  const double frontRms = std::sqrt(frontSumSq / (framesPerPacket_ * 2));
+  const double discreteRms = std::sqrt(discreteSumSq / (inputFrames * discreteChannels));
+  const double frontRms = std::sqrt(frontSumSq / (inputFrames * 2));
   constexpr double kThreshold = 0.0005; // ~ -66 dB
   const bool discreteActive = discreteRms >= kThreshold;
   if (hasDiscreteActivity)
@@ -913,7 +948,7 @@ bool SpdifEncoder::IsEffectivelyStereo(const uint8_t* in, bool* hasDiscreteActiv
   if (multichannelHoldFrames_ > 0)
   {
     if (frontRms >= kThreshold)
-      multichannelHoldFrames_ = std::max(0, multichannelHoldFrames_ - framesPerPacket_);
+      multichannelHoldFrames_ = std::max(0, multichannelHoldFrames_ - inputFrames);
     if (multichannelHoldFrames_ > 0)
     {
       effectivelyStereo_ = false;
@@ -925,13 +960,13 @@ bool SpdifEncoder::IsEffectivelyStereo(const uint8_t* in, bool* hasDiscreteActiv
   return true; // Only FL/FR carry audio -> Upmix to 5.1/3.1!
 }
 
-void SpdifEncoder::ExtractStereo(const uint8_t* in, uint8_t* out) const
+void SpdifEncoder::ExtractStereo(const uint8_t* in, uint8_t* out, int inputFrames) const
 {
   const int ch = inLayout_.nb_channels;
   const int bps = av_get_bytes_per_sample(inSampleFmt_);
   const int inStride = ch * bps;
   const int outStride = 2 * bps;
-  for (int i = 0; i < framesPerPacket_; ++i)
+  for (int i = 0; i < inputFrames; ++i)
     std::memcpy(out + i * outStride, in + i * inStride, static_cast<size_t>(outStride));
 }
 

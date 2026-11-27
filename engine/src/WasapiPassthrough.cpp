@@ -155,8 +155,9 @@ bool WasapiPassthrough::Init(IMMDevice* dev, RingBuffer* ring, const CaptureForm
   }
   if (!InitExclusive(rate)) return false;
 
-  const size_t packetBytes = static_cast<size_t>(framesPerPacket_) * capBytesPerFrame_;
-  staging_.resize(packetBytes);
+  const size_t chunkBytes =
+      static_cast<size_t>(SpdifEncoder::kPcmChunkFrames) * capBytesPerFrame_;
+  staging_.resize(chunkBytes);
   silence_.assign(packetBytes, 0);
   encoderBurst_.fill(0);
   currentBurst_.fill(0);
@@ -375,7 +376,7 @@ void WasapiPassthrough::EncoderThreadProc()
 
   const size_t primeBytes =
       (static_cast<size_t>(framesPerPacket_) + params_.safeFrames) * capBytesPerFrame_;
-  const size_t packetBytes = staging_.size();
+  const size_t chunkBytes = staging_.size();
   const std::chrono::milliseconds waitSlice(20);
   bool encoderPrimed = false;
 
@@ -391,8 +392,7 @@ void WasapiPassthrough::EncoderThreadProc()
       }
       encoderPrimed = true;
     }
-    // This worker is the only RingBuffer consumer. Apply render-thread trim requests
-    // here, retaining one complete codec packet so drift correction cannot starve encoding.
+
     const uint64_t trimRequested = pendingTrimFrames_.exchange(0, std::memory_order_acq_rel);
     if (trimRequested != 0)
     {
@@ -415,39 +415,19 @@ void WasapiPassthrough::EncoderThreadProc()
     }
 
     available = ring_->BytesAvailable();
-    if (available < packetBytes)
+    if (available < chunkBytes)
     {
       if (available == 0) encoderPrimed = false;
-      ring_->WaitForData(encoderPrimed ? packetBytes : primeBytes, waitSlice);
+      ring_->WaitForData(encoderPrimed ? chunkBytes : primeBytes, waitSlice);
       continue;
     }
-    HANDLE queueWaits[2] = { queueSpaceSemaphore_, stopEvent_ };
-    const DWORD queueWait = WaitForMultipleObjects(2, queueWaits, FALSE, INFINITE);
-    if (queueWait == WAIT_OBJECT_0 + 1) break;
-    if (queueWait != WAIT_OBJECT_0)
-    {
-      failed_.store(true, std::memory_order_release);
-      running_.store(false, std::memory_order_release);
-      if (diagnostics_) diagnostics_->outputWasapiErrors.fetch_add(1, std::memory_order_relaxed);
-      std::fprintf(stderr, "[WasapiPassthrough] queue-slot wait failed (%lu).\n", GetLastError());
-      if (stopEvent_) SetEvent(stopEvent_);
-      break;
-    }
-    if (!running_.load(std::memory_order_relaxed))
-    {
-      ReleaseSemaphore(queueSpaceSemaphore_, 1, nullptr);
-      break;
-    }
-    if (ring_->Read(staging_.data(), packetBytes) != packetBytes)
-    {
-      ReleaseSemaphore(queueSpaceSemaphore_, 1, nullptr);
+    if (ring_->Read(staging_.data(), chunkBytes) != chunkBytes)
       continue;
-    }
 
-    encoderPendingFrames_.fetch_add(static_cast<uint32_t>(framesPerPacket_), std::memory_order_acq_rel);
     const auto encodeStart = std::chrono::steady_clock::now();
-    const int encodedBytes = enc_.EncodePacket(staging_.data(), encoderBurst_.data(),
-                                               static_cast<int>(encoderBurst_.size()));
+    const int encodedBytes = enc_.EncodeChunk(
+        staging_.data(), SpdifEncoder::kPcmChunkFrames, encoderBurst_.data(),
+        static_cast<int>(encoderBurst_.size()));
     const uint64_t encodeUs = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now() - encodeStart).count());
@@ -460,17 +440,18 @@ void WasapiPassthrough::EncoderThreadProc()
 
     if (encodedBytes < 0)
     {
-      ReleaseSemaphore(queueSpaceSemaphore_, 1, nullptr);
-      encoderPendingFrames_.fetch_sub(static_cast<uint32_t>(framesPerPacket_), std::memory_order_acq_rel);
       failed_.store(true, std::memory_order_release);
       running_.store(false, std::memory_order_release);
       if (diagnostics_) diagnostics_->outputWasapiErrors.fetch_add(1, std::memory_order_relaxed);
-      std::fprintf(stderr, "[WasapiPassthrough] AC-3/DTS encoder worker failed.\n");
+      std::fprintf(stderr, "[WasapiPassthrough] incremental DSP/encoder failed.\n");
       queueCv_.notify_all();
       ring_->WakeWaiters();
       if (stopEvent_) SetEvent(stopEvent_);
       break;
     }
+    if (encodedBytes == 0)
+      continue;
+
     if (encodedBytes != static_cast<int>(burstBytes_))
     {
       std::fprintf(stderr, "[WasapiPassthrough] encoded burst mismatch (%d != %zu); using silence.\n",
@@ -478,14 +459,22 @@ void WasapiPassthrough::EncoderThreadProc()
       std::memcpy(encoderBurst_.data(), silenceBurst_.data(), burstBytes_);
     }
 
-    if (!running_.load(std::memory_order_relaxed))
+    // Reserve an encoded-queue slot only after a complete codec frame is available.
+    HANDLE queueWaits[2] = { queueSpaceSemaphore_, stopEvent_ };
+    const DWORD queueWait = WaitForMultipleObjects(2, queueWaits, FALSE, INFINITE);
+    if (queueWait == WAIT_OBJECT_0 + 1 || !running_.load(std::memory_order_relaxed))
+      break;
+    if (queueWait != WAIT_OBJECT_0)
     {
-      ReleaseSemaphore(queueSpaceSemaphore_, 1, nullptr);
-      encoderPendingFrames_.fetch_sub(static_cast<uint32_t>(framesPerPacket_), std::memory_order_acq_rel);
+      failed_.store(true, std::memory_order_release);
+      running_.store(false, std::memory_order_release);
+      if (diagnostics_) diagnostics_->outputWasapiErrors.fetch_add(1, std::memory_order_relaxed);
+      std::fprintf(stderr, "[WasapiPassthrough] queue-slot wait failed (%lu).\n", GetLastError());
+      if (stopEvent_) SetEvent(stopEvent_);
       break;
     }
-    // Space was checked before encoding. Only the consumer can free queue slots, so a
-    // push failure is an invariant violation rather than a recoverable full-queue case.
+
+    encoderPendingFrames_.fetch_add(static_cast<uint32_t>(framesPerPacket_), std::memory_order_acq_rel);
     if (!queuedBursts_.TryPush(encoderBurst_))
     {
       ReleaseSemaphore(queueSpaceSemaphore_, 1, nullptr);
@@ -500,8 +489,6 @@ void WasapiPassthrough::EncoderThreadProc()
       break;
     }
     {
-      // Pair startup notifications with its wait mutex; the real-time consumer never
-      // takes this mutex, so it cannot inherit encoder-side lock contention.
       std::lock_guard<std::mutex> lock(queueWaitMutex_);
     }
     queueCv_.notify_all();
