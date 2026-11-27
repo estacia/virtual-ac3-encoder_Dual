@@ -72,7 +72,8 @@ public:
     Always,       // Forced 5.1 on all audio
     AlwaysFront,  // Forced 3.1 on all audio
     DualStereo,   // Direct stereo copy: FL->SL, FR->SR; Center/LFE silent; native 5.1 untouched
-    TimeDomain,   // Center/difference-rear + one-pole LFE; no FFT/FIFO latency
+    TimeDomain,   // Center/difference-rear + one-pole LFE; auto-detects stereo in multichannel input
+    TimeDomainNative51, // Same matrix for 2ch input; any multichannel input bypasses the matrix
   };
 
   struct Params
@@ -157,6 +158,7 @@ private:
   bool             useFilter_ = false;
   bool             useDts_ = false;
   bool             timeDomain_ = false;
+  bool             timeDomainNative51_ = false; // strict mode: only matrix-upmix 2-channel input
   float            lfeFilterState_ = 0.0f;
   AVFilterGraph*   graph_     = nullptr;
   AVFilterContext* fsrc_      = nullptr; // abuffer

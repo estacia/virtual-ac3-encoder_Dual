@@ -207,6 +207,55 @@ std::vector<double> EncodeDualStereoRms(bool input51, bool native51)
   return DecodeSpdifAc3Rms(stream.data(), static_cast<int>(stream.size()));
 }
 
+std::vector<double> EncodeTimeDomainNative51Rms(bool input51, bool native51, SpdifEncoder::Upmix mode)
+{
+  SpdifEncoder::Params p;
+  p.sampleRate = 48000;
+  p.inSampleFmt = AV_SAMPLE_FMT_FLT;
+  p.upmix = mode;
+  if (input51)
+  {
+    AVChannelLayout lay51 = AV_CHANNEL_LAYOUT_5POINT1_BACK;
+    av_channel_layout_copy(&p.inLayout, &lay51);
+  }
+  else
+    av_channel_layout_default(&p.inLayout, 2);
+
+  SpdifEncoder enc;
+  bool ok = enc.Init(p);
+  av_channel_layout_uninit(&p.inLayout);
+  REQUIRE(ok);
+
+  const int fpp = enc.FramesPerPacket();
+  const int ch = input51 ? 6 : 2;
+  std::vector<float> in(static_cast<size_t>(fpp) * ch, 0.0f);
+  std::vector<uint8_t> out(SpdifEncoder::kMaxBytesPerPacket);
+  std::vector<uint8_t> stream;
+  long long t = 0;
+  for (int pk = 0; pk < 24; ++pk)
+  {
+    for (int i = 0; i < fpp; ++i)
+    {
+      const double phase = 2.0 * kPi * double(t + i) / 48000.0;
+      in[static_cast<size_t>(i) * ch + 0] = 0.25f * static_cast<float>(std::sin(440.0 * phase));
+      in[static_cast<size_t>(i) * ch + 1] = 0.22f * static_cast<float>(std::sin(554.0 * phase));
+      if (input51 && native51)
+      {
+        in[static_cast<size_t>(i) * ch + 2] = 0.20f * static_cast<float>(std::sin(660.0 * phase));
+        in[static_cast<size_t>(i) * ch + 3] = 0.12f * static_cast<float>(std::sin(100.0 * phase));
+        in[static_cast<size_t>(i) * ch + 4] = 0.18f * static_cast<float>(std::sin(330.0 * phase));
+        in[static_cast<size_t>(i) * ch + 5] = 0.17f * static_cast<float>(std::sin(392.0 * phase));
+      }
+    }
+    t += fpp;
+    const int n = enc.EncodePacket(reinterpret_cast<uint8_t*>(in.data()), out.data(),
+                                   static_cast<int>(out.size()));
+    if (n > 0) stream.insert(stream.end(), out.data(), out.data() + n);
+  }
+  REQUIRE(stream.size() > static_cast<size_t>(6144) * 4);
+  return DecodeSpdifAc3Rms(stream.data(), static_cast<int>(stream.size()));
+}
+
 } // namespace
 
 TEST_CASE("Dual Stereo Copy: 2-channel stereo is copied to matching rear channels")
@@ -776,6 +825,54 @@ TEST_CASE("time-domain matrix: anti-phase stereo steers to rear channels without
   CHECK(enc.FilterHopFrames() == 0);
   CHECK(enc.FilterFifoFrames() == 0);
   CHECK(enc.FilterProcessedFrames() == 0);
+}
+
+TEST_CASE("Time-domain Matrix + Native 5.1 Untouched: matrix still processes true 2-channel stereo")
+{
+  const std::vector<double> rms =
+      AntiPhaseSurroundRms(SpdifEncoder::Upmix::TimeDomainNative51);
+  REQUIRE(rms.size() >= 6);
+  CHECK(rms[4] > 0.05);
+  CHECK(rms[5] > 0.05);
+  CHECK(rms[2] < 0.02);
+  CHECK(rms[3] < 0.02);
+}
+
+TEST_CASE("Time-domain Matrix + Native 5.1 Untouched: 5.1 endpoint with stereo-only content bypasses matrix")
+{
+  const std::vector<double> legacy =
+      EncodeTimeDomainNative51Rms(true, false, SpdifEncoder::Upmix::TimeDomain);
+  const std::vector<double> strict =
+      EncodeTimeDomainNative51Rms(true, false, SpdifEncoder::Upmix::TimeDomainNative51);
+  REQUIRE(legacy.size() >= 6);
+  REQUIRE(strict.size() >= 6);
+
+  // Legacy mode detects front-only content inside a 5.1 endpoint as stereo and matrix-upmixes it.
+  CHECK(legacy[4] > 0.03);
+  CHECK(legacy[5] > 0.03);
+
+  // Strict mode trusts the endpoint layout: no matrix-generated Center/LFE/rears.
+  CHECK(strict[0] > 0.03);
+  CHECK(strict[1] > 0.03);
+  CHECK(strict[2] < 0.005);
+  CHECK(strict[3] < 0.005);
+  CHECK(strict[4] < 0.005);
+  CHECK(strict[5] < 0.005);
+}
+
+TEST_CASE("Time-domain Matrix + Native 5.1 Untouched: active native 5.1 matches direct channel mapping")
+{
+  const std::vector<double> baseline =
+      EncodeTimeDomainNative51Rms(true, true, SpdifEncoder::Upmix::Off);
+  const std::vector<double> strict =
+      EncodeTimeDomainNative51Rms(true, true, SpdifEncoder::Upmix::TimeDomainNative51);
+  REQUIRE(baseline.size() >= 6);
+  REQUIRE(strict.size() >= 6);
+  for (int ch = 0; ch < 6; ++ch)
+  {
+    CHECK(strict[ch] > 0.02);
+    CHECK(std::fabs(strict[ch] - baseline[ch]) < 0.01);
+  }
 }
 
 TEST_CASE("time-domain matrix: LFE is low-passed and calibrated below main channels")

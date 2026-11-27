@@ -90,7 +90,7 @@ int g_ac3Bitrate = 0; // 0=640k, 1=448k
 int g_latencyPreset = 2; // 0=Extreme, 1=Fast, 2=Balanced, 3=Safe, 4=Relaxed
 int g_safeFrames = 128;
 bool g_useCustomSafeFrames = false;
-int g_upmixMode = 0; // 0=Dynamic Surround, 6=Dual Stereo Copy, 7=Off
+int g_upmixMode = 0; // 0=Dynamic, 6=Dual Stereo, 7=Off, 8=Time-domain Matrix, 9=Matrix + Native 5.1 Untouched
 bool g_loopback = true;
 bool g_outAutoSpdif = true;
 int  g_reloadId = 1;
@@ -433,8 +433,8 @@ void SaveConfiguration(int reloadId = 0) {
     else
         cfg.erase("safe");
 
-    const char* upmixes[] = {"dynamic", "front", "3.0", "2.1", "always", "always_front", "dual_stereo", "off", "time_domain"};
-    cfg["upmix"] = upmixes[std::clamp(g_upmixMode, 0, 8)];
+    const char* upmixes[] = {"dynamic", "front", "3.0", "2.1", "always", "always_front", "dual_stereo", "off", "time_domain", "time_domain_51"};
+    cfg["upmix"] = upmixes[std::clamp(g_upmixMode, 0, 9)];
 
     WriteKvAtomic(g_configPath, cfg);
     WriteControlFile(false, reloadId);
@@ -504,7 +504,8 @@ void LoadConfiguration() {
     }
 
     const std::string up = cfg["upmix"];
-    if (up == "time_domain" || up == "matrix" || up == "low_latency") g_upmixMode = 8;
+    if (up == "time_domain_51" || up == "time_domain_native51" || up == "time_domain_untouched") g_upmixMode = 9;
+    else if (up == "time_domain" || up == "matrix" || up == "low_latency") g_upmixMode = 8;
     else if (up == "off") g_upmixMode = 7;
     else if (up == "dual_stereo" || up == "dual-stereo" || up == "copy") g_upmixMode = 6;
     else if (up == "always_front" || up == "always_3.1") g_upmixMode = 5;
@@ -1059,20 +1060,16 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int) {
         if (ImGui::CollapsingHeader("STREAM DIAGNOSTICS")) {
             const MeterSharedState* state = g_meterMem.IsOpen() ? g_meterMem.Get() : nullptr;
             if (state && state->version >= 4) {
-                const auto readCounter = [](const volatile LONG64* value) {
-                    return static_cast<unsigned long long>(
-                        InterlockedCompareExchange64(const_cast<volatile LONG64*>(value), 0, 0));
-                };
-                const unsigned long long dropped = readCounter(&state->captureDroppedFrames);
-                const unsigned long long underrunFrames = readCounter(&state->outputUnderrunFrames);
-                const unsigned long long underrunPackets = readCounter(&state->outputUnderrunPackets);
-                const unsigned long long wasapiErrors = readCounter(&state->wasapiErrorCount);
-                const unsigned long long eventTimeouts = readCounter(&state->eventTimeoutCount);
-                const unsigned long long driftTrim = readCounter(&state->driftTrimFrames);
-                const unsigned long long ringFill = readCounter(&state->ringFillFrames);
-                const unsigned long long ringPeak = readCounter(&state->ringPeakFrames);
+                const unsigned long long dropped = ReadMeterCounter(&state->captureDroppedFrames);
+                const unsigned long long underrunFrames = ReadMeterCounter(&state->outputUnderrunFrames);
+                const unsigned long long underrunPackets = ReadMeterCounter(&state->outputUnderrunPackets);
+                const unsigned long long wasapiErrors = ReadMeterCounter(&state->wasapiErrorCount);
+                const unsigned long long eventTimeouts = ReadMeterCounter(&state->eventTimeoutCount);
+                const unsigned long long driftTrim = ReadMeterCounter(&state->driftTrimFrames);
+                const unsigned long long ringFill = ReadMeterCounter(&state->ringFillFrames);
+                const unsigned long long ringPeak = ReadMeterCounter(&state->ringPeakFrames);
                 const unsigned int ringCapacity = static_cast<unsigned int>(
-                    InterlockedCompareExchange(const_cast<volatile LONG*>(&state->ringCapacityFrames), 0, 0));
+                    ReadMeterLong(&state->ringCapacityFrames));
                 const double rate = state->sampleRate ? static_cast<double>(state->sampleRate) : 48000.0;
                 ImGui::Text("Capture dropped: %llu frames (%.2f ms)",
                     dropped, 1000.0 * static_cast<double>(dropped) / rate);
@@ -1086,22 +1083,18 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int) {
                 ImGui::Text("Ring fill: %llu / %u frames | peak: %llu frames",
                     ringFill, ringCapacity, ringPeak);
 
-                const auto readLong = [](const volatile LONG* value) {
-                    return InterlockedCompareExchange(
-                        const_cast<volatile LONG*>(value), 0, 0);
-                };
                 const unsigned int queueBursts = static_cast<unsigned int>(
-                    readLong(&state->encoderQueueBursts));
+                    ReadMeterLong(&state->encoderQueueBursts));
                 const unsigned int pendingFrames = static_cast<unsigned int>(
-                    readLong(&state->encoderPendingFrames));
+                    ReadMeterLong(&state->encoderPendingFrames));
                 const unsigned int activeBurstRemaining = static_cast<unsigned int>(
-                    readLong(&state->currentBurstRemainingFrames));
+                    ReadMeterLong(&state->currentBurstRemainingFrames));
                 const unsigned int renderBufferFrames = static_cast<unsigned int>(
-                    readLong(&state->renderBufferFrames));
-                const unsigned long long encodeLastUs = readCounter(&state->encodeDurationLastUs);
-                const unsigned long long encodeMaxUs = readCounter(&state->encodeDurationMaxUs);
-                const unsigned long long renderLastUs = readCounter(&state->renderEventLastUs);
-                const unsigned long long renderMaxUs = readCounter(&state->renderEventMaxUs);
+                    ReadMeterLong(&state->renderBufferFrames));
+                const unsigned long long encodeLastUs = ReadMeterCounter(&state->encodeDurationLastUs);
+                const unsigned long long encodeMaxUs = ReadMeterCounter(&state->encodeDurationMaxUs);
+                const unsigned long long renderLastUs = ReadMeterCounter(&state->renderEventLastUs);
+                const unsigned long long renderMaxUs = ReadMeterCounter(&state->renderEventMaxUs);
                 const unsigned long long pipelineFrames =
                     ringFill + pendingFrames + renderBufferFrames;
                 ImGui::Text("Encoder queue: %u bursts | pending before WASAPI: %u frames (%.2f ms)",
@@ -1115,13 +1108,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int) {
                 ImGui::Text("Encode time: last %llu / max %llu us | Render event: last %llu / max %llu us",
                     encodeLastUs, encodeMaxUs, renderLastUs, renderMaxUs);
 
-                const LONG filterState = InterlockedCompareExchange(
-                    const_cast<volatile LONG*>(&state->surroundFilterState), 0, 0);
-                const LONG filterHop = InterlockedCompareExchange(
-                    const_cast<volatile LONG*>(&state->surroundFilterHopFrames), 0, 0);
-                const unsigned long long filterFifo = readCounter(&state->surroundFilterFifoFrames);
-                const LONG filterTarget = InterlockedCompareExchange(
-                    const_cast<volatile LONG*>(&state->surroundFilterTargetFrames), 0, 0);
+                const LONG filterState = ReadMeterLong(&state->surroundFilterState);
+                const LONG filterHop = ReadMeterLong(&state->surroundFilterHopFrames);
+                const unsigned long long filterFifo = ReadMeterCounter(&state->surroundFilterFifoFrames);
+                const LONG filterTarget = ReadMeterLong(&state->surroundFilterTargetFrames);
                 const char* filterLabel = "Disabled";
                 switch (filterState) {
                     case 1: filterLabel = "Stereo FFT upmix"; break;
@@ -1298,13 +1288,16 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int) {
                 "Always Front Stage 3.1 (Forced 3.1 on All Audio - Rears Silent)",
                 "Dual Stereo Copy (FL->SL / FR->SR, No Upmix, Native 5.1 Untouched)",
                 "Off (Pure Stereo 2.0: Front L/R Only, Center & Sub Silent)",
-                "Time-domain Matrix 5.1 (No FFT/FIFO; Center + Difference Rears + LFE)"
+                "Time-domain Matrix 5.1 (No FFT/FIFO; Center + Difference Rears + LFE)",
+                "Time-domain Matrix + Native 5.1 Untouched (Matrix only for 2-channel input)"
             };
             if (ImGui::Combo("Stereo Upmix", &g_upmixMode, upmixes, IM_ARRAYSIZE(upmixes))) {
                 TriggerApplySettings();
             }
             if (g_upmixMode == 8)
-                ImGui::TextDisabled("No FFT/FIFO buffering; stereo imaging differs from Dynamic Surround.");
+                ImGui::TextDisabled("No FFT/FIFO buffering; multichannel input is matrix-upmixed only when it is detected as effectively stereo.");
+            else if (g_upmixMode == 9)
+                ImGui::TextDisabled("No FFT/FIFO buffering. Applies the matrix only to 2-channel input; any multichannel input bypasses the matrix, even when only FL/FR are active.");
 
             ImGui::Spacing();
             const char* activeModeStr = (g_outputMode == 0) ? "DTS 5.1" : ((g_outputMode == 1) ? "Dolby Digital (AC3)" : "PCM Stereo");
