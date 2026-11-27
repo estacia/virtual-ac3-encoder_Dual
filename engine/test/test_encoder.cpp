@@ -114,6 +114,31 @@ TEST_CASE("incremental DSP: six 256-sample blocks form one AC-3 frame")
   CHECK(peaks[1] == doctest::Approx(0.25f).epsilon(0.01f));
 }
 
+TEST_CASE("incremental DSP: two 256-sample blocks form one DTS frame")
+{
+  SpdifEncoder enc;
+  REQUIRE(InitFor(enc, 6, AV_SAMPLE_FMT_FLT, 48000, SpdifEncoder::Codec::DTS));
+  REQUIRE(enc.FramesPerPacket() == 512);
+  std::vector<float> input(static_cast<size_t>(SpdifEncoder::kPcmChunkFrames) * 2 * 6, 0.0f);
+  for (size_t i = 0; i < input.size(); i += 6)
+  {
+    input[i + 0] = 0.20f;
+    input[i + 1] = -0.20f;
+  }
+
+  std::vector<uint8_t> out(SpdifEncoder::kMaxBytesPerPacket);
+  const uint8_t* first = reinterpret_cast<const uint8_t*>(input.data());
+  CHECK(enc.EncodeChunk(first, SpdifEncoder::kPcmChunkFrames,
+                        out.data(), static_cast<int>(out.size())) == 0);
+
+  const uint8_t* second = reinterpret_cast<const uint8_t*>(
+      input.data() + static_cast<size_t>(SpdifEncoder::kPcmChunkFrames) * 6);
+  const int n = enc.EncodeChunk(second, SpdifEncoder::kPcmChunkFrames,
+                                out.data(), static_cast<int>(out.size()));
+  CHECK(n == 2048);
+  CHECK((HasIec61937Sync(out.data()) || HasDtsSync(out.data())));
+}
+
 TEST_CASE("encode: 7.1 input is downmixed to 5.1")
 {
   SpdifEncoder enc;
