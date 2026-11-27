@@ -94,6 +94,7 @@ static void LoadConfigFile(const std::string& path, Config& c)
     else if (k == "loopback")  c.loopback = truthy(v);
     else if (k == "out_spdif") c.outAutoSpdif = truthy(v);
     else if (k == "upmix")     c.upmix = v;
+    else if (k == "speaker_layout") c.speakerLayout4_0 = (v == "4.0" || v == "4" || v == "no_center_sub");
     else if (k == "output_mode") c.outputMode = v;
     else if (k == "dts_rate")
     {
@@ -427,6 +428,7 @@ int main(int argc, char** argv)
         pp.safeFrames = effectiveSafe;
         pp.surroundWindowSize =
             (c.latencyMode == "extreme" || c.latencyMode == "ultra") ? 1024 : 4096;
+        pp.foldDownCenterLfeToFront = c.speakerLayout4_0;
         if (c.upmix == "dual_stereo" || c.upmix == "dual-stereo" || c.upmix == "copy")
           pp.upmix = SpdifEncoder::Upmix::DualStereo;
         else if (c.upmix == "time_domain_51" || c.upmix == "time_domain_native51" || c.upmix == "time_domain_untouched")
