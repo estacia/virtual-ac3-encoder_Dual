@@ -43,6 +43,9 @@ public:
     Warming = 3,
     NativeBypass = 4,
     HoldPrewarm = 5,
+    TimeDomainWaiting = 6,
+    TimeDomainMatrix = 7,
+    TimeDomainNativeBypass = 8,
   };
 
   static constexpr int kSurroundFilterHopFrames = 2048;
@@ -136,8 +139,12 @@ private:
   void ApplyTimeDomainUpmix(AVFrame* target);
 
   // Dynamic upmix helpers: detect stereo content in a multichannel stream and extract FL+FR.
+  // Detect stereo content inside a multichannel endpoint. The strict Native 5.1
+  // mode supplies a lower threshold so quiet discrete channels still protect
+  // native multichannel material from being matrix-upmixed.
   bool IsEffectivelyStereo(const uint8_t* in, int inputFrames,
-                           bool* hasDiscreteActivity = nullptr) const;
+                           bool* hasDiscreteActivity = nullptr,
+                           double discreteRmsThreshold = 0.0005) const;
   void ExtractStereo(const uint8_t* in, uint8_t* out, int inputFrames) const;
 
   mutable std::array<std::atomic<float>, 6> peakLevels_{};
@@ -158,7 +165,9 @@ private:
   bool             useFilter_ = false;
   bool             useDts_ = false;
   bool             timeDomain_ = false;
-  bool             timeDomainNative51_ = false; // strict mode: only matrix-upmix 2-channel input
+  bool             timeDomainNative51_ = false; // content-aware native-channel protection with lower detection threshold
+  bool             timeDomainMatrixDetected_ = false;
+  bool             timeDomainMatrixApplied_ = false;
   float            lfeFilterState_ = 0.0f;
   AVFilterGraph*   graph_     = nullptr;
   AVFilterContext* fsrc_      = nullptr; // abuffer

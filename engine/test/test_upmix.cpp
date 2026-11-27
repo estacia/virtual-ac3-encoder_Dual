@@ -207,7 +207,9 @@ std::vector<double> EncodeDualStereoRms(bool input51, bool native51)
   return DecodeSpdifAc3Rms(stream.data(), static_cast<int>(stream.size()));
 }
 
-std::vector<double> EncodeTimeDomainNative51Rms(bool input51, bool native51, SpdifEncoder::Upmix mode)
+std::vector<double> EncodeTimeDomainNative51Rms(bool input51, bool native51, SpdifEncoder::Upmix mode,
+                                                float discreteScale = 1.0f,
+                                                SpdifEncoder::FilterStatus* finalStatus = nullptr)
 {
   SpdifEncoder::Params p;
   p.sampleRate = 48000;
@@ -241,10 +243,10 @@ std::vector<double> EncodeTimeDomainNative51Rms(bool input51, bool native51, Spd
       in[static_cast<size_t>(i) * ch + 1] = 0.22f * static_cast<float>(std::sin(554.0 * phase));
       if (input51 && native51)
       {
-        in[static_cast<size_t>(i) * ch + 2] = 0.20f * static_cast<float>(std::sin(660.0 * phase));
-        in[static_cast<size_t>(i) * ch + 3] = 0.12f * static_cast<float>(std::sin(100.0 * phase));
-        in[static_cast<size_t>(i) * ch + 4] = 0.18f * static_cast<float>(std::sin(330.0 * phase));
-        in[static_cast<size_t>(i) * ch + 5] = 0.17f * static_cast<float>(std::sin(392.0 * phase));
+        in[static_cast<size_t>(i) * ch + 2] = discreteScale * 0.20f * static_cast<float>(std::sin(660.0 * phase));
+        in[static_cast<size_t>(i) * ch + 3] = discreteScale * 0.12f * static_cast<float>(std::sin(100.0 * phase));
+        in[static_cast<size_t>(i) * ch + 4] = discreteScale * 0.18f * static_cast<float>(std::sin(330.0 * phase));
+        in[static_cast<size_t>(i) * ch + 5] = discreteScale * 0.17f * static_cast<float>(std::sin(392.0 * phase));
       }
     }
     t += fpp;
@@ -252,6 +254,8 @@ std::vector<double> EncodeTimeDomainNative51Rms(bool input51, bool native51, Spd
                                    static_cast<int>(out.size()));
     if (n > 0) stream.insert(stream.end(), out.data(), out.data() + n);
   }
+  if (finalStatus)
+    *finalStatus = enc.GetFilterStatus();
   REQUIRE(stream.size() > static_cast<size_t>(6144) * 4);
   return DecodeSpdifAc3Rms(stream.data(), static_cast<int>(stream.size()));
 }
@@ -821,7 +825,7 @@ TEST_CASE("time-domain matrix: anti-phase stereo steers to rear channels without
   const bool ok = enc.Init(p);
   av_channel_layout_uninit(&p.inLayout);
   REQUIRE(ok);
-  CHECK(enc.GetFilterStatus() == SpdifEncoder::FilterStatus::Disabled);
+  CHECK(enc.GetFilterStatus() == SpdifEncoder::FilterStatus::TimeDomainWaiting);
   CHECK(enc.FilterHopFrames() == 0);
   CHECK(enc.FilterFifoFrames() == 0);
   CHECK(enc.FilterProcessedFrames() == 0);
@@ -838,34 +842,69 @@ TEST_CASE("Time-domain Matrix + Native 5.1 Untouched: matrix still processes tru
   CHECK(rms[3] < 0.02);
 }
 
-TEST_CASE("Time-domain Matrix + Native 5.1 Untouched: 5.1 endpoint with stereo-only content bypasses matrix")
+TEST_CASE("Time-domain Matrix + Native 5.1 Untouched: front-only stereo on a 5.1 endpoint is matrix-upmixed")
 {
   const std::vector<double> legacy =
       EncodeTimeDomainNative51Rms(true, false, SpdifEncoder::Upmix::TimeDomain);
+  SpdifEncoder::FilterStatus strictStatus = SpdifEncoder::FilterStatus::Disabled;
   const std::vector<double> strict =
-      EncodeTimeDomainNative51Rms(true, false, SpdifEncoder::Upmix::TimeDomainNative51);
+      EncodeTimeDomainNative51Rms(true, false, SpdifEncoder::Upmix::TimeDomainNative51,
+                                  1.0f, &strictStatus);
   REQUIRE(legacy.size() >= 6);
   REQUIRE(strict.size() >= 6);
 
-  // Legacy mode detects front-only content inside a 5.1 endpoint as stereo and matrix-upmixes it.
-  CHECK(legacy[4] > 0.03);
-  CHECK(legacy[5] > 0.03);
-
-  // Strict mode trusts the endpoint layout: no matrix-generated Center/LFE/rears.
+  // A 5.1-configured virtual endpoint carrying only stereo FL/FR must still be upmixed.
+  for (int ch : {2, 4, 5})
+  {
+    CHECK(legacy[static_cast<size_t>(ch)] > 0.03);
+    CHECK(strict[static_cast<size_t>(ch)] > 0.03);
+  }
   CHECK(strict[0] > 0.03);
   CHECK(strict[1] > 0.03);
-  CHECK(strict[2] < 0.005);
-  CHECK(strict[3] < 0.005);
-  CHECK(strict[4] < 0.005);
-  CHECK(strict[5] < 0.005);
+  CHECK(strictStatus == SpdifEncoder::FilterStatus::TimeDomainMatrix);
+  CHECK(std::fabs(strict[4] - legacy[4]) < 0.01);
+  CHECK(std::fabs(strict[5] - legacy[5]) < 0.01);
+}
+
+TEST_CASE("Time-domain Matrix + Native 5.1 Untouched: quiet discrete channels trigger native protection")
+{
+  // These discrete channels are below the normal -66 dBFS detector threshold,
+  // but remain above the strict mode's -80 dBFS threshold.
+  SpdifEncoder::FilterStatus normalStatus = SpdifEncoder::FilterStatus::Disabled;
+  SpdifEncoder::FilterStatus strictStatus = SpdifEncoder::FilterStatus::Disabled;
+  const std::vector<double> baseline =
+      EncodeTimeDomainNative51Rms(true, true, SpdifEncoder::Upmix::Off, 0.002f);
+  const std::vector<double> normal =
+      EncodeTimeDomainNative51Rms(true, true, SpdifEncoder::Upmix::TimeDomain, 0.002f,
+                                  &normalStatus);
+  const std::vector<double> strict =
+      EncodeTimeDomainNative51Rms(true, true, SpdifEncoder::Upmix::TimeDomainNative51, 0.002f,
+                                  &strictStatus);
+  REQUIRE(baseline.size() >= 6);
+  REQUIRE(normal.size() >= 6);
+  REQUIRE(strict.size() >= 6);
+
+  // Strict mode preserves the original channel mapping even when discrete audio is quiet.
+  for (int ch = 0; ch < 6; ++ch)
+    CHECK(std::fabs(strict[static_cast<size_t>(ch)] -
+                    baseline[static_cast<size_t>(ch)]) < 0.01);
+
+  // The ordinary -66 dBFS mode treats this low-level discrete content as stereo,
+  // while strict native protection recognizes it and does not create rear channels.
+  CHECK(normal[4] > strict[4] + 0.02);
+  CHECK(normal[5] > strict[5] + 0.02);
+  CHECK(normalStatus == SpdifEncoder::FilterStatus::TimeDomainMatrix);
+  CHECK(strictStatus == SpdifEncoder::FilterStatus::TimeDomainNativeBypass);
 }
 
 TEST_CASE("Time-domain Matrix + Native 5.1 Untouched: active native 5.1 matches direct channel mapping")
 {
   const std::vector<double> baseline =
       EncodeTimeDomainNative51Rms(true, true, SpdifEncoder::Upmix::Off);
+  SpdifEncoder::FilterStatus strictStatus = SpdifEncoder::FilterStatus::Disabled;
   const std::vector<double> strict =
-      EncodeTimeDomainNative51Rms(true, true, SpdifEncoder::Upmix::TimeDomainNative51);
+      EncodeTimeDomainNative51Rms(true, true, SpdifEncoder::Upmix::TimeDomainNative51,
+                                  1.0f, &strictStatus);
   REQUIRE(baseline.size() >= 6);
   REQUIRE(strict.size() >= 6);
   for (int ch = 0; ch < 6; ++ch)
@@ -873,6 +912,7 @@ TEST_CASE("Time-domain Matrix + Native 5.1 Untouched: active native 5.1 matches 
     CHECK(strict[ch] > 0.02);
     CHECK(std::fabs(strict[ch] - baseline[ch]) < 0.01);
   }
+  CHECK(strictStatus == SpdifEncoder::FilterStatus::TimeDomainNativeBypass);
 }
 
 TEST_CASE("time-domain matrix: LFE is low-passed and calibrated below main channels")

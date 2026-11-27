@@ -46,6 +46,14 @@ void SpdifEncoder::GetChannelLevels(float outPeaks[6], float outRms[6]) const
 
 SpdifEncoder::FilterStatus SpdifEncoder::GetFilterStatus() const
 {
+  if (timeDomain_)
+  {
+    if (!timeDomainMatrixDetected_)
+      return FilterStatus::TimeDomainWaiting;
+    return timeDomainMatrixApplied_
+        ? FilterStatus::TimeDomainMatrix
+        : FilterStatus::TimeDomainNativeBypass;
+  }
   if (useFilter_)
     return FilterStatus::StereoUpmix;
   if (!dynamicUpmix_)
@@ -272,6 +280,8 @@ bool SpdifEncoder::Init(const Params& p)
   alwaysUpmix_ = (p.upmix == Upmix::Always || p.upmix == Upmix::AlwaysFront);
   timeDomain_ = isTimeDomain;
   timeDomainNative51_ = (p.upmix == Upmix::TimeDomainNative51);
+  timeDomainMatrixDetected_ = false;
+  timeDomainMatrixApplied_ = false;
   lfeFilterState_ = 0.0f;
   useFilter_ = (wantUpmix && inLayout_.nb_channels <= 2);
   dynamicUpmix_ = (wantUpmix && inLayout_.nb_channels > 2);
@@ -390,6 +400,8 @@ void SpdifEncoder::Close()
   useDts_ = false;
   timeDomain_ = false;
   timeDomainNative51_ = false;
+  timeDomainMatrixDetected_ = false;
+  timeDomainMatrixApplied_ = false;
   lfeFilterState_ = 0.0f;
   dynamicUpmix_ = false;
   alwaysUpmix_ = false;
@@ -682,11 +694,17 @@ int SpdifEncoder::EncodeChunk(const uint8_t* in, int inputFrames,
   else if (timeDomain_)
   {
     if (!convertDirect(swr_)) return -1;
-    // The strict variant trusts the configured input layout. Only a true 2-channel
-    // endpoint is matrix-upmixed; 5.1/7.1 endpoints bypass the matrix even when
-    // the current content carries audio only in FL/FR.
+    // Both Time-domain modes inspect actual channel activity, not just endpoint layout.
+    // This allows stereo carried by a 5.1/7.1 virtual endpoint to be matrix-upmixed,
+    // while native multichannel content remains untouched whenever discrete channels
+    // (Center/LFE/Surrounds) are active.
+    // The Native 5.1 Untouched variant uses a lower -80 dBFS RMS threshold (vs -66 dB)
+    // so quiet discrete channels still protect genuine 5.1/7.1 material.
+    const double nativeProtectionThreshold = timeDomainNative51_ ? 0.0001 : 0.0005;
     const bool stereoSource = (inLayout_.nb_channels <= 2) ||
-        (!timeDomainNative51_ && IsEffectivelyStereo(in, inputFrames));
+        IsEffectivelyStereo(in, inputFrames, nullptr, nativeProtectionThreshold);
+    timeDomainMatrixDetected_ = true;
+    timeDomainMatrixApplied_ = stereoSource;
     if (stereoSource) ApplyTimeDomainUpmix(chunkFrame_);
     haveProcessedChunk = true;
   }
@@ -872,7 +890,8 @@ int SpdifEncoder::WritePacketThunk(void* opaque, const uint8_t* buf, int buf_siz
 }
 
 bool SpdifEncoder::IsEffectivelyStereo(const uint8_t* in, int inputFrames,
-                                       bool* hasDiscreteActivity) const
+                                       bool* hasDiscreteActivity,
+                                       double discreteRmsThreshold) const
 {
   if (hasDiscreteActivity)
     *hasDiscreteActivity = false;
@@ -886,7 +905,8 @@ bool SpdifEncoder::IsEffectivelyStereo(const uint8_t* in, int inputFrames,
   // only populate Front Left (ch 0) and Front Right (ch 1); Windows leaves all discrete
   // non-stereo channels (Center = ch 2, LFE = ch 3, Surrounds = ch 4..ch-1) at digital zero.
   // If ANY discrete multichannel channel (Center, LFE, or Rear/Side Surrounds, c >= 2) carries
-  // signal (>= -66 dB), the source is native 5.1/7.1 and MUST pass through untouched.
+  // signal above the selected RMS threshold, the source is treated as native 5.1/7.1 and
+  // passed through untouched. The strict Time-domain mode supplies a lower -80 dBFS threshold.
   double discreteSumSq = 0.0;
   double frontSumSq = 0.0;
   const int discreteChannels = ch - 2;
@@ -939,8 +959,8 @@ bool SpdifEncoder::IsEffectivelyStereo(const uint8_t* in, int inputFrames,
 
   const double discreteRms = std::sqrt(discreteSumSq / (inputFrames * discreteChannels));
   const double frontRms = std::sqrt(frontSumSq / (inputFrames * 2));
-  constexpr double kThreshold = 0.0005; // ~ -66 dB
-  const bool discreteActive = discreteRms >= kThreshold;
+  constexpr double kFrontActivityThreshold = 0.0005; // ~ -66 dBFS
+  const bool discreteActive = discreteRms >= std::max(0.0, discreteRmsThreshold);
   if (hasDiscreteActivity)
     *hasDiscreteActivity = discreteActive;
 
@@ -956,7 +976,7 @@ bool SpdifEncoder::IsEffectivelyStereo(const uint8_t* in, int inputFrames,
 
   if (multichannelHoldFrames_ > 0)
   {
-    if (frontRms >= kThreshold)
+    if (frontRms >= kFrontActivityThreshold)
       multichannelHoldFrames_ = std::max(0, multichannelHoldFrames_ - inputFrames);
     if (multichannelHoldFrames_ > 0)
     {
