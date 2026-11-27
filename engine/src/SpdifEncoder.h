@@ -136,8 +136,12 @@ private:
   void ApplyTimeDomainUpmix(AVFrame* target);
 
   // Dynamic upmix helpers: detect stereo content in a multichannel stream and extract FL+FR.
+  // Detect stereo content inside a multichannel endpoint. The strict Native 5.1
+  // mode supplies a lower threshold so quiet discrete channels still protect
+  // native multichannel material from being matrix-upmixed.
   bool IsEffectivelyStereo(const uint8_t* in, int inputFrames,
-                           bool* hasDiscreteActivity = nullptr) const;
+                           bool* hasDiscreteActivity = nullptr,
+                           double discreteRmsThreshold = 0.0005) const;
   void ExtractStereo(const uint8_t* in, uint8_t* out, int inputFrames) const;
 
   mutable std::array<std::atomic<float>, 6> peakLevels_{};
