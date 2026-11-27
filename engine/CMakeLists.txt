@@ -139,6 +139,7 @@ add_executable(unit_tests
   test/test_spscqueue.cpp
   test/test_encoder.cpp
   test/test_upmix.cpp
+  test/test_meter_shared_state.cpp
 )
 target_include_directories(unit_tests PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/doctest"
