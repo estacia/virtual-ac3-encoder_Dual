@@ -129,7 +129,6 @@ private:
   int OnWritePacket(const uint8_t* buf, int buf_size);
 
   bool BuildFilterGraph();              // surround-upmix path
-  bool FeedFilter(const uint8_t* in);  // codec-sized compatibility wrapper
   bool FeedFilterFrames(const uint8_t* in, int inputFrames);
   int  EncodeFrameToBurst(uint8_t* outBuf, int outSize);
   void ApplyChannelGainsAndComputeLevels(AVFrame* target);

@@ -491,7 +491,7 @@ bool SpdifEncoder::BuildFilterGraph()
 
   filterInputFrame_->format = inSampleFmt_;
   filterInputFrame_->sample_rate = sampleRate_;
-  filterInputFrame_->nb_samples = framesPerPacket_;
+  filterInputFrame_->nb_samples = kPcmChunkFrames;
   rc = av_channel_layout_copy(&filterInputFrame_->ch_layout, &filterInLayout_);
   if (rc < 0) { LogAv("av_channel_layout_copy(filter input)", rc); return false; }
   rc = av_frame_get_buffer(filterInputFrame_, 0);
@@ -502,10 +502,13 @@ bool SpdifEncoder::BuildFilterGraph()
   // both 1536-sample AC3 and 512-sample DTS packets never underrun between FFT hops.
   const int primeTarget = std::max(framesPerPacket_, surroundHopFrames_);
   const int inBytes =
-      framesPerPacket_ * filterInLayout_.nb_channels * av_get_bytes_per_sample(inSampleFmt_);
+      kPcmChunkFrames * filterInLayout_.nb_channels * av_get_bytes_per_sample(inSampleFmt_);
   std::vector<uint8_t> silence(static_cast<size_t>(inBytes), 0);
-  for (int guard = 0; guard < 64 && av_audio_fifo_size(fifo_) < primeTarget; ++guard)
-    if (!FeedFilter(silence.data()))
+  // Keep the same maximum priming budget as the old codec-sized loop, but feed the
+  // filter in 128-sample quanta to match the smaller preallocated input frame.
+  const int maxPrimeBlocks = 64 * (framesPerPacket_ / kPcmChunkFrames);
+  for (int guard = 0; guard < maxPrimeBlocks && av_audio_fifo_size(fifo_) < primeTarget; ++guard)
+    if (!FeedFilterFrames(silence.data(), kPcmChunkFrames))
       break;
 
   const char* modeName = isFront30 ? "3.0 front stage" : (isSub21 ? "2.1 stereo+sub" : (isFront31 ? "3.1 front stage (Center+Sub)" : "surround"));
@@ -517,14 +520,9 @@ bool SpdifEncoder::BuildFilterGraph()
   return true;
 }
 
-bool SpdifEncoder::FeedFilter(const uint8_t* in)
-{
-  return FeedFilterFrames(in, framesPerPacket_);
-}
-
 bool SpdifEncoder::FeedFilterFrames(const uint8_t* in, int inputFrames)
 {
-  if (!in || inputFrames <= 0 || inputFrames > framesPerPacket_ ||
+  if (!in || inputFrames <= 0 || inputFrames > kPcmChunkFrames ||
       !filterInputFrame_ || !fsrc_ || !fsink_)
     return false;
 
