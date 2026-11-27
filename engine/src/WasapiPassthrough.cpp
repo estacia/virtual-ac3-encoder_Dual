@@ -155,6 +155,7 @@ bool WasapiPassthrough::Init(IMMDevice* dev, RingBuffer* ring, const CaptureForm
   }
   if (!InitExclusive(rate)) return false;
 
+  const size_t packetBytes = static_cast<size_t>(framesPerPacket_) * capBytesPerFrame_;
   const size_t chunkBytes =
       static_cast<size_t>(SpdifEncoder::kPcmChunkFrames) * capBytesPerFrame_;
   staging_.resize(chunkBytes);
@@ -374,30 +375,20 @@ void WasapiPassthrough::EncoderThreadProc()
   if (mmcss && !AvSetMmThreadPriority(mmcss, AVRT_PRIORITY_HIGH))
     std::fprintf(stderr, "[WasapiPassthrough] encoder MMCSS HIGH failed: %lu\n", GetLastError());
 
-  const size_t primeBytes =
-      (static_cast<size_t>(framesPerPacket_) + params_.safeFrames) * capBytesPerFrame_;
   const size_t chunkBytes = staging_.size();
+  const size_t readyBytes =
+      (static_cast<size_t>(SpdifEncoder::kPcmChunkFrames) + params_.safeFrames) *
+      capBytesPerFrame_;
   const std::chrono::milliseconds waitSlice(20);
-  bool encoderPrimed = false;
 
   while (running_.load(std::memory_order_relaxed))
   {
-    size_t available = ring_->BytesAvailable();
-    if (!encoderPrimed)
-    {
-      if (available < primeBytes)
-      {
-        ring_->WaitForData(primeBytes, waitSlice);
-        continue;
-      }
-      encoderPrimed = true;
-    }
-
     const uint64_t trimRequested = pendingTrimFrames_.exchange(0, std::memory_order_acq_rel);
     if (trimRequested != 0)
     {
       const size_t availableFrames = ring_->BytesAvailable() / capBytesPerFrame_;
-      const size_t keepFrames = static_cast<size_t>(framesPerPacket_);
+      const size_t keepFrames = static_cast<size_t>(SpdifEncoder::kPcmChunkFrames) +
+                                params_.safeFrames;
       const size_t droppableFrames = availableFrames > keepFrames
           ? availableFrames - keepFrames : 0;
       const size_t trimNow = static_cast<size_t>(
@@ -414,11 +405,13 @@ void WasapiPassthrough::EncoderThreadProc()
         pendingTrimFrames_.fetch_add(trimRequested - discardedFrames, std::memory_order_release);
     }
 
-    available = ring_->BytesAvailable();
-    if (available < chunkBytes)
+    // Keep SafeFrames in the input ring while consuming one DSP quantum at a time.
+    // Unlike the previous frame-wide gate, this does not wait for all 1536 AC-3
+    // samples before starting DSP; the codec still receives only complete frames.
+    const size_t available = ring_->BytesAvailable();
+    if (available < readyBytes)
     {
-      if (available == 0) encoderPrimed = false;
-      ring_->WaitForData(encoderPrimed ? chunkBytes : primeBytes, waitSlice);
+      ring_->WaitForData(readyBytes, waitSlice);
       continue;
     }
     if (ring_->Read(staging_.data(), chunkBytes) != chunkBytes)
@@ -459,7 +452,6 @@ void WasapiPassthrough::EncoderThreadProc()
       std::memcpy(encoderBurst_.data(), silenceBurst_.data(), burstBytes_);
     }
 
-    // Reserve an encoded-queue slot only after a complete codec frame is available.
     HANDLE queueWaits[2] = { queueSpaceSemaphore_, stopEvent_ };
     const DWORD queueWait = WaitForMultipleObjects(2, queueWaits, FALSE, INFINITE);
     if (queueWait == WAIT_OBJECT_0 + 1 || !running_.load(std::memory_order_relaxed))
@@ -702,7 +694,8 @@ void WasapiPassthrough::ThreadProc()
     std::fprintf(stderr, "[WasapiPassthrough] AvSetMmThreadPriority(HIGH) failed: %lu\n",
                  GetLastError());
 
-  const uint32_t desired = static_cast<uint32_t>(framesPerPacket_) + params_.safeFrames;
+  const uint32_t desired =
+      static_cast<uint32_t>(SpdifEncoder::kPcmChunkFrames) + params_.safeFrames;
   HANDLE waits[2] = { dataEvent_, stopEvent_ };
   unsigned consecutiveTimeouts = 0;
 
@@ -749,7 +742,7 @@ void WasapiPassthrough::ThreadProc()
       if (driftFrameAccumulator_ >= capFmt_.sampleRate)
       {
         const uint32_t hysteresis = std::max<uint32_t>(
-            static_cast<uint32_t>(framesPerPacket_), params_.safeFrames);
+            static_cast<uint32_t>(SpdifEncoder::kPcmChunkFrames), params_.safeFrames);
         if (minAvail_ != 0xFFFFFFFFu && minAvail_ > desired + hysteresis)
         {
           const uint32_t excess = minAvail_ - (desired + hysteresis / 2);

@@ -35,8 +35,8 @@ struct Config
     const bool dts = (outputMode == "dts");
     if (dts)
     {
-      // DTS frames are 512 samples (10.67 ms at 48 kHz). Keep at least one
-      // complete DTS frame as the Extreme cushion; larger presets add jitter margin.
+      // DTS uses 512-sample codec frames. This value now controls additional
+      // input-ring jitter margin; the incremental DSP quantum remains 256 samples.
       if (latencyMode == "extreme" || latencyMode == "ultra")
         return 512;
       if (latencyMode == "fast" || latencyMode == "low")
@@ -48,8 +48,8 @@ struct Config
       return 1536;
     }
 
-    // AC-3 frames are 1536 samples (32 ms at 48 kHz). This is an additional
-    // pre-roll cushion on top of the mandatory codec/output frames, not a packet size.
+    // AC-3 remains a 1536-sample codec frame (32 ms at 48 kHz), but input DSP
+    // runs in 256-sample blocks. This value is additional ring-buffer jitter margin.
     if (latencyMode == "extreme" || latencyMode == "ultra")
       return 128;
     if (latencyMode == "fast" || latencyMode == "low")
