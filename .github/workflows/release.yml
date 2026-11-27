@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Explicit version e.g. 0.2.0 (default: auto patch-bump from latest release)'
+        description: 'Explicit version e.g. 1.0.5 (else commit marker, then auto patch-bump)'
         required: false
 
 permissions:
@@ -24,13 +24,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Determine version (explicit input, else auto patch-bump)
+      - name: Determine version (input, merge commit marker, else auto patch-bump)
         id: ver
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
         run: |
           $ver = "${{ github.event.inputs.version }}"
+          if (-not $ver -and $env:RELEASE_COMMIT_MESSAGE -match '\\[release-version:([0-9]+\\.[0-9]+\\.[0-9]+)\\]') {
+            $ver = $Matches[1]
+          }
           if (-not $ver) {
             $latest = ""
             try {
@@ -43,7 +47,7 @@ jobs:
                 if ($resp) { $latest = $resp }
               } catch {}
             }
-            if ($latest -match '^v?(\d+)\.(\d+)\.(\d+)') {
+            if ($latest -match '^v?(\\d+)\\.(\\d+)\\.(\\d+)') {
               $ver = '{0}.{1}.{2}' -f $Matches[1], $Matches[2], ([int]$Matches[3] + 1)
             } else {
               $ver = '0.2.0'
@@ -126,7 +130,7 @@ jobs:
           $exe = "installer/Output/virtual-ac3-encoder-setup-$ver.exe"
           $notes = @"
           **Dolby Control Center** — Real-time multichannel & stereo PCM -> **DTS 5.1** / **Dolby Digital (AC-3) 5.1** / **PCM 2.0** -> IEC 61937 / S-PDIF (Toslink) processor for Windows.
-          A software ``Dolby Digital Live`` & ``DTS Connect`` replacement with a DirectX 11 Control Center, 6-channel VU meters, Dynamic Surround 5.1 & Front Stage 3.1 upmixing.
+          A software ``Dolby Digital Live`` & ``DTS Connect`` replacement with a DirectX 11 Control Center, 6-channel VU meters, Dynamic Surround 5.1, Time-domain Matrix 5.1, Time-domain Matrix + Native 5.1 Untouched, and Front Stage modes. The Control Center includes live diagnostics for capture drops, output underruns, WASAPI errors, queue depth, processing time, and filter state.
 
           ## Downloads
           - **virtual-ac3-encoder-setup-$ver.exe** - **Dolby Control Center** installer (per-user, no admin); auto-starts minimized to tray at logon.
