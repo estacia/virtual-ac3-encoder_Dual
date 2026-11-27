@@ -1119,9 +1119,12 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int) {
                     case 3: filterLabel = "FFT warm-up"; break;
                     case 4: filterLabel = "Native 5.1 - FFT bypassed"; break;
                     case 5: filterLabel = "Native hold - FFT pre-warmed"; break;
+                    case 6: filterLabel = "Time-domain Matrix - waiting for input"; break;
+                    case 7: filterLabel = "Time-domain Matrix active (stereo detected)"; break;
+                    case 8: filterLabel = "Native 5.1/7.1 preserved (matrix bypassed)"; break;
                     default: break;
                 }
-                ImGui::Text("Surround filter: %s", filterLabel);
+                ImGui::Text("Upmix processing: %s", filterLabel);
                 if (filterHop > 0) {
                     ImGui::Text("FFT hop: %ld frames (%.2f ms) | FIFO: %llu / %ld frames (%.2f / %.2f ms)",
                         filterHop, 1000.0 * static_cast<double>(filterHop) / rate,
