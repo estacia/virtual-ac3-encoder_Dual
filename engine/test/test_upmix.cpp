@@ -158,12 +158,13 @@ std::vector<double> AntiPhaseSurroundRms(SpdifEncoder::Upmix mode)
 }
 
 
-std::vector<double> EncodeDualStereoRms(bool input51, bool native51)
+std::vector<double> EncodeDualStereoRms(bool input51, bool native51, bool foldDown4_0 = false)
 {
   SpdifEncoder::Params p;
   p.sampleRate = 48000;
   p.inSampleFmt = AV_SAMPLE_FMT_FLT;
   p.upmix = SpdifEncoder::Upmix::DualStereo;
+  p.foldDownCenterLfeToFront = foldDown4_0;
   if (input51)
   {
     AVChannelLayout lay51 = AV_CHANNEL_LAYOUT_5POINT1_BACK;
@@ -209,12 +210,14 @@ std::vector<double> EncodeDualStereoRms(bool input51, bool native51)
 
 std::vector<double> EncodeTimeDomainNative51Rms(bool input51, bool native51, SpdifEncoder::Upmix mode,
                                                 float discreteScale = 1.0f,
-                                                SpdifEncoder::FilterStatus* finalStatus = nullptr)
+                                                SpdifEncoder::FilterStatus* finalStatus = nullptr,
+                                                bool foldDown4_0 = false)
 {
   SpdifEncoder::Params p;
   p.sampleRate = 48000;
   p.inSampleFmt = AV_SAMPLE_FMT_FLT;
   p.upmix = mode;
+  p.foldDownCenterLfeToFront = foldDown4_0;
   if (input51)
   {
     AVChannelLayout lay51 = AV_CHANNEL_LAYOUT_5POINT1_BACK;
