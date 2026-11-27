@@ -667,6 +667,8 @@ int SpdifEncoder::EncodeChunk(const uint8_t* in, int inputFrames,
 
   bool usedUpmixFilter = false;
   bool haveProcessedChunk = false;
+  bool foldDownNativeChannels = false;
+  speakerFoldDownActive_ = false;
 
   auto convertDirect = [&](SwrContext* converter) -> bool {
     if (!converter || av_frame_make_writable(chunkFrame_) < 0) return false;
@@ -767,7 +769,24 @@ int SpdifEncoder::EncodeChunk(const uint8_t* in, int inputFrames,
         IsEffectivelyStereo(in, inputFrames, nullptr, nativeProtectionThreshold);
     timeDomainMatrixDetected_ = true;
     timeDomainMatrixApplied_ = stereoSource;
-    if (stereoSource) ApplyTimeDomainUpmix(chunkFrame_);
+    if (stereoSource)
+    {
+      ApplyTimeDomainUpmix(chunkFrame_);
+      // The Time-domain matrix derives C and LFE from the original stereo.
+      // With no Center/Sub speakers, omit these duplicates: FL/FR already retain
+      // the complete original signal and the difference-derived rears remain active.
+      if (foldDownCenterLfeToFront_ && codecCtx_->ch_layout.nb_channels >= 6)
+      {
+        std::fill_n(reinterpret_cast<float*>(chunkFrame_->extended_data[2]), inputFrames, 0.0f);
+        std::fill_n(reinterpret_cast<float*>(chunkFrame_->extended_data[3]), inputFrames, 0.0f);
+      }
+    }
+    else if (foldDownCenterLfeToFront_)
+    {
+      // This is genuine multichannel content. Fold only its native C/LFE channels;
+      // preserve FL/FR and SL/SR as discrete channels.
+      foldDownNativeChannels = true;
+    }
     haveProcessedChunk = true;
   }
   else if (dualStereoSwr_)
@@ -822,10 +841,17 @@ int SpdifEncoder::EncodeChunk(const uint8_t* in, int inputFrames,
       std::memset(fc, 0, bytes);
       std::memset(lfe, 0, bytes);
     }
+    else if (foldDownCenterLfeToFront_)
+    {
+      foldDownNativeChannels = true;
+    }
     haveProcessedChunk = true;
   }
 
   if (!haveProcessedChunk) return 0;
+
+  if (foldDownNativeChannels)
+    ApplyCenterLfeFoldDown(chunkFrame_);
 
   if (usedUpmixFilter && codecCtx_->ch_layout.nb_channels >= 6)
   {
